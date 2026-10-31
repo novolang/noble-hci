@@ -1,0 +1,173 @@
+// tests/edge_tests.nv — the boundaries of the seam: a short buffer, a reserved bit, a value at the end of its range.
+//
+// The module tests beside each source file cover the commands and events one by one.  This file covers what
+// a reader of the package sees at an edge: an H4 buffer that stops early, a length field with reserved bits,
+// a handle that overflows its twelve bits, a UUID of the wrong length, an address on a sub-type boundary.
+//
+//   novo test tests/edge_tests.nv
+
+use std.test
+use hci_h4
+use hci_frame
+use hci_codec
+use hci_commands
+use bd_addr
+use uuid
+
+// ── H4 length extraction ────────────────────────────────────────────
+
+@test
+fn test_h4_empty_buffer_needs_more()
+    test.assert_eq(hci_h4.h4_packet_length([]), hci_h4.H4_BYTES_NEED_MORE)
+
+@test
+fn test_h4_header_cut_short_needs_more()
+    test.assert_eq(hci_h4.h4_packet_length([0x01, 0x03, 0x0C]), hci_h4.H4_BYTES_NEED_MORE)
+    test.assert_eq(hci_h4.h4_packet_length([0x04, 0x0E]), hci_h4.H4_BYTES_NEED_MORE)
+    test.assert_eq(hci_h4.h4_packet_length([0x02, 0x01, 0x00, 0x05]), hci_h4.H4_BYTES_NEED_MORE)
+    test.assert_eq(hci_h4.h4_packet_length([0x05, 0x01, 0x00, 0x05]), hci_h4.H4_BYTES_NEED_MORE)
+
+@test
+fn test_h4_sco_and_unknown_types_are_rejected()
+    test.assert_eq(hci_h4.h4_packet_length([0x03, 0, 0, 0, 0]), hci_h4.H4_BYTES_REJECT)
+    test.assert_eq(hci_h4.h4_packet_length([0x00, 0, 0, 0, 0]), hci_h4.H4_BYTES_REJECT)
+    test.assert_eq(hci_h4.h4_packet_length([0xFF, 0, 0, 0, 0]), hci_h4.H4_BYTES_REJECT)
+
+@test
+fn test_h4_command_with_a_maximum_parameter_length()
+    test.assert_eq(hci_h4.h4_packet_length([0x01, 0x03, 0x0C, 0xFF]), 4 + 255)
+
+@test
+fn test_h4_acl_length_is_sixteen_bits()
+    test.assert_eq(hci_h4.h4_packet_length([0x02, 0x01, 0x00, 0xFF, 0xFF]), 5 + 0xFFFF)
+
+@test
+fn test_h4_iso_length_ignores_the_two_reserved_bits()
+    // Data_Total_Length is 14 bits: 0xFF in the high octet counts as 0x3F.
+    test.assert_eq(hci_h4.h4_packet_length([0x05, 0x01, 0x00, 0xFF, 0xFF]), 5 + 0x3FFF)
+    test.assert_eq(hci_h4.h4_packet_length([0x05, 0x01, 0x00, 0x10, 0xC0]), 5 + 0x10)
+
+@test
+fn test_h4_frame_of_an_empty_packet_is_the_type_byte()
+    let w = hci_h4.frame_h4(hci_h4.PKT_EVENT, [])
+    test.assert_eq(list.len(w), 1)
+    test.assert_eq(w[0] as Int, 0x04)
+
+@test
+fn test_h4_frame_then_length_agree_for_a_command()
+    let w = hci_codec.cmd_hci_reset()
+    test.assert_eq(hci_h4.h4_packet_length(w), list.len(w))
+
+// ── Opcode and ACL packing ──────────────────────────────────────────
+
+@test
+fn test_opcode_packs_and_splits_at_the_field_edges()
+    let op = hci_frame.pack_opcode(0x3F, 0x3FF)
+    test.assert_eq(op, 0xFFFF)
+    test.assert_eq(hci_frame.opcode_ogf(op), 0x3F)
+    test.assert_eq(hci_frame.opcode_ocf(op), 0x3FF)
+    test.assert_eq(hci_frame.pack_opcode(0, 0), 0)
+
+@test
+fn test_acl_handle_overflow_is_masked_to_twelve_bits()
+    let hf = hci_frame.pack_acl_handle_flags(0x1FFF, 0, 0)
+    test.assert_eq(hci_frame.acl_handle(hf), 0xFFF)
+    test.assert_eq(hci_frame.acl_pb_flag(hf), 0)
+    test.assert_eq(hci_frame.acl_bc_flag(hf), 0)
+
+@test
+fn test_acl_flags_round_trip_at_their_maxima()
+    let hf = hci_frame.pack_acl_handle_flags(0x0EFF, 3, 3)
+    test.assert_eq(hci_frame.acl_handle(hf), 0x0EFF)
+    test.assert_eq(hci_frame.acl_pb_flag(hf), 3)
+    test.assert_eq(hci_frame.acl_bc_flag(hf), 3)
+
+@test
+fn test_command_message_round_trips_with_no_parameters()
+    let bytes = hci_frame.encode_hci_cmd_msg(hci_frame.HciCmdMsg { opcode: 0x0C03, params: [] })
+    test.assert_eq(list.len(bytes), 3)
+    let back = hci_frame.decode_hci_cmd_msg(bytes)
+    test.assert_eq(back.opcode, 0x0C03)
+    test.assert_eq(list.len(back.params), 0)
+
+@test
+fn test_event_message_round_trips_with_parameters()
+    let bytes = hci_frame.encode_hci_evt_msg(hci_frame.HciEvtMsg { event_code: 0x0E, params: [0x01, 0x03, 0x0C, 0x00] })
+    let back = hci_frame.decode_hci_evt_msg(bytes)
+    test.assert_eq(back.event_code, 0x0E)
+    test.assert_eq(list.len(back.params), 4)
+
+// ── Event readers on a buffer that is too short ─────────────────────
+
+@test
+fn test_event_readers_answer_minus_one_on_an_empty_event()
+    test.assert_eq(hci_codec.event_code([]), -1)
+    test.assert_eq(hci_codec.event_param_len([0x0E]), -1)
+
+@test
+fn test_command_complete_is_recognised_and_read()
+    // Command Complete for HCI_Reset: code 0x0E, length 4, one credit, opcode 0x0C03, status 0.
+    let evt = [0x0E, 0x04, 0x01, 0x03, 0x0C, 0x00]
+    test.assert(hci_codec.is_command_complete(evt))
+    test.assert_eq(hci_codec.command_complete_opcode(evt), 0x0C03)
+    test.assert_eq(hci_codec.command_complete_status(evt), 0)
+    test.assert(not hci_codec.is_command_status(evt))
+
+// ── BdAddr ──────────────────────────────────────────────────────────
+
+@test
+fn test_random_address_sub_type_boundaries()
+    // byte[5] is the most significant octet; its top two bits select the sub-type.
+    test.assert(hci_addr_kind([0, 0, 0, 0, 0, 0x3F]) == bd_addr.NonResolvable)
+    test.assert(hci_addr_kind([0, 0, 0, 0, 0, 0x40]) == bd_addr.Resolvable)
+    test.assert(hci_addr_kind([0, 0, 0, 0, 0, 0x7F]) == bd_addr.Resolvable)
+    test.assert(hci_addr_kind([0, 0, 0, 0, 0, 0xC0]) == bd_addr.StaticRandom)
+    test.assert(hci_addr_kind([0, 0, 0, 0, 0, 0xFF]) == bd_addr.StaticRandom)
+
+// 0b10 is reserved; the classifier answers NonResolvable for it, a defined value.
+@test
+fn test_reserved_sub_type_classifies_as_non_resolvable()
+    test.assert(hci_addr_kind([0, 0, 0, 0, 0, 0x80]) == bd_addr.NonResolvable)
+    test.assert(hci_addr_kind([0, 0, 0, 0, 0, 0xBF]) == bd_addr.NonResolvable)
+
+fn hci_addr_kind(b: [u8]) -> bd_addr.BdAddrKind
+    bd_addr.classify_random(b)
+
+@test
+fn test_address_prints_storage_order_with_zero_padding()
+    test.assert_eq(bd_addr.format_bd_addr([0x01, 0x0A, 0x00, 0xFF, 0x10, 0xC5]), "01:0A:00:FF:10:C5")
+
+// ── Uuid ────────────────────────────────────────────────────────────
+
+@test
+fn test_uuid16_at_the_ends_of_its_range()
+    let lo = uuid.uuid16_to_128(0x0000)
+    let hi = uuid.uuid16_to_128(0xFFFF)
+    test.assert_eq(list.len(lo), 16)
+    test.assert_eq(list.len(hi), 16)
+    test.assert_eq(hi[12] as Int, 0xFF)
+    test.assert_eq(hi[13] as Int, 0xFF)
+    test.assert_eq(lo[12] as Int, 0x00)
+    test.assert(uuid.uuid_eq_short_full(0xFFFF, hi))
+    test.assert(not uuid.uuid_eq_short_full(0xFFFF, lo))
+
+@test
+fn test_uuid_of_the_wrong_length_never_matches()
+    test.assert(not uuid.uuid128_eq([0x01], uuid.base_uuid_bytes()))
+    test.assert(not uuid.uuid128_eq(uuid.base_uuid_bytes(), []))
+    test.assert(not uuid.uuid_eq_short_full(0x180F, [0x00, 0x01]))
+    test.assert(uuid.uuid128_eq(uuid.base_uuid_bytes(), uuid.base_uuid_bytes()))
+
+@test
+fn test_uuid16_wire_form_round_trips_and_a_short_buffer_answers_minus_one()
+    test.assert_eq(uuid.uuid16_from_le_bytes(uuid.uuid16_to_le_bytes(0x2A19)), 0x2A19)
+    test.assert_eq(uuid.uuid16_from_le_bytes([0x19]), -1)
+    test.assert_eq(uuid.uuid16_from_le_bytes([]), -1)
+
+@test
+fn test_uuid32_overlays_four_octets_of_the_base()
+    let u = uuid.uuid32_to_128(0x12345678)
+    test.assert_eq(u[12] as Int, 0x78)
+    test.assert_eq(u[13] as Int, 0x56)
+    test.assert_eq(u[14] as Int, 0x34)
+    test.assert_eq(u[15] as Int, 0x12)

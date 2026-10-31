@@ -1,0 +1,196 @@
+// orbit/noble-hci/src/bd_addr.nv — BLE device addresses.
+//
+// Core Vol 6 Part B §1.3 defines four address types.  The top two
+// bits of byte[5] disambiguate the random types:
+//
+//   Public              (TxAdd=0 in the PDU header)   — OUI-based
+//   Static Random       top 2 bits = 0b11             — §1.3.2.1
+//   Non-Resolvable      top 2 bits = 0b00             — §1.3.2.2
+//   Resolvable (RPA)    top 2 bits = 0b01             — §1.3.2.2
+//   (0b10 is Reserved for Future Use)
+//
+// These four are easy to transpose, and the cost is silent: an RPA
+// tagged with the reserved pattern is never resolved by a conformant
+// peer, so privacy "works" locally and fails on air.  The Core Spec's
+// own §D.4 worked example pins the assignment — that example's prand
+// is 0x708194 and it IS an RPA, and 0x70 >> 6 = 0b01.
+//
+// Addresses go out on air least-significant octet first, and the
+// `[u8]` here holds them in exactly that order: byte[0] is the
+// least-significant octet, byte[5] the most significant.  That
+// is why the sub-type bits above are read out of byte[5] and not
+// byte[0] — and why it is the reverse of the MSB-first
+// "AA:BB:CC:DD:EE:FF" notation humans and scanners use.
+//
+// Satisfies: REQ-BLE-LL-062 / -063 / -064 / -PRIV-005 / -PRIV-006.
+
+use std.test
+use std.bits
+
+// Address-type enum.  Public is OUI-assigned; the three random
+// variants are disambiguated by the top two bits of byte[5].
+enum BdAddrKind
+    Public
+    StaticRandom
+    NonResolvable
+    Resolvable
+
+// A BD_ADDR value: the 48-bit address plus its declared type.
+struct BdAddr
+    kind: BdAddrKind
+    bytes: [u8]
+
+// Extract the top two bits of byte[5] — the "address sub-type"
+// discriminant for random addresses (§1.3.2).
+//
+// `bytes` is in on-air order (see the header), so byte[5] is the
+// most significant octet — the one carrying the sub-type bits.
+@tier(embedded)
+@no_alloc
+fn addr_top2(bytes: [u8]) -> Int
+    ((bytes[5] as Int) >>> 6) & 0x3
+
+// Classify a random-address byte array by its top-2-bits pattern.
+//   0b11 → Static Random
+//   0b00 → Non-Resolvable Private
+//   0b01 → Resolvable Private
+//   0b10 → reserved for future use; we treat it as
+//          NonResolvable so a malformed incoming PDU produces a
+//          well-defined value rather than a parse error.
+//
+// The canonical cross-check, if this is ever in doubt again: an
+// RPA's most-significant octet lies in 0x40..0x7F, a static
+// random address's in 0xC0..0xFF, a non-resolvable one's in
+// 0x00..0x3F.  orbit/crypto-ble-ecc/src/privacy_rpa.nv holds the
+// same table with executable tests behind it.
+@satisfies("REQ-BLE-LL-063")
+@satisfies("REQ-BLE-PRIV-001")
+@satisfies("REQ-BLE-PRIV-004")
+@satisfies("REQ-BLE-PRIV-005")
+@tier(embedded)
+fn classify_random(bytes: [u8]) -> BdAddrKind
+    match addr_top2(bytes)
+        3 => StaticRandom
+        1 => Resolvable
+        _ => NonResolvable
+
+// Convenience constructor — wraps a 6-byte array in a BdAddr
+// tagged StaticRandom.  Lives in this module (not ll_address)
+// because cross-module struct construction emits a bare type
+// name in the OCaml codegen today; see pilot finding #8.
+@tier(embedded)
+fn static_random(bytes: [u8]) -> BdAddr
+    BdAddr { kind: StaticRandom, bytes: bytes }
+
+// Format a 6-byte address as colon-separated hex, byte[0] first —
+// i.e. storage order, least-significant octet leftmost.  Note this
+// is the reverse of the MSB-first form scanners and `btmon` print,
+// so a log line here reads backwards against nRF Connect.  Useful
+// for boot-time logging.
+@tier(embedded)
+fn format_bd_addr(bytes: [u8]) -> Str
+    let a = hex_byte(bytes[0] as Int)
+    let b = hex_byte(bytes[1] as Int)
+    let c = hex_byte(bytes[2] as Int)
+    let d = hex_byte(bytes[3] as Int)
+    let e = hex_byte(bytes[4] as Int)
+    let f = hex_byte(bytes[5] as Int)
+    a + ":" + b + ":" + c + ":" + d + ":" + e + ":" + f
+
+@tier(embedded)
+fn hex_byte(n: Int) -> Str
+    let hi = (n >>> 4) & 0xF
+    let lo = n & 0xF
+    // "" + anchor forces OCaml codegen to pick string-concat
+    // early; see dns-pilot-findings #11.
+    "" + hex_nibble(hi) + hex_nibble(lo)
+
+@tier(embedded)
+fn hex_nibble(n: Int) -> Str
+    match n
+        0  => "0"
+        1  => "1"
+        2  => "2"
+        3  => "3"
+        4  => "4"
+        5  => "5"
+        6  => "6"
+        7  => "7"
+        8  => "8"
+        9  => "9"
+        10 => "A"
+        11 => "B"
+        12 => "C"
+        13 => "D"
+        14 => "E"
+        _  => "F"
+
+// ── Tests ────────────────────────────────────────────────────────────
+
+@test
+@satisfies("REQ-BLE-LL-062")
+fn test_classify_static_random()
+    // 0xC0 = 0b11000000 → top-2 = 0b11 → StaticRandom.
+    let b: [u8] = [0x01, 0x02, 0x03, 0x04, 0x05, 0xC0]
+    match classify_random(b)
+        StaticRandom => test.assert_eq(1, 1)
+        _            => test.assert_eq(0, 1)
+
+@test
+@satisfies("REQ-BLE-PRIV-005")
+fn test_classify_rpa()
+    // 0x70 = 0b01110000 → top-2 = 0b01 → Resolvable.  0x70 is the
+    // most significant octet of the Core Spec §D.4 worked example's
+    // prand (0x708194), so this is the spec's own RPA, not a
+    // hand-picked byte.
+    let b: [u8] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x70]
+    match classify_random(b)
+        Resolvable => test.assert_eq(1, 1)
+        _          => test.assert_eq(0, 1)
+
+@test
+@satisfies("REQ-BLE-PRIV-005")
+fn test_reserved_subtype_is_not_classified_resolvable()
+    // 0b10 is Reserved for Future Use.  This module classified it
+    // as Resolvable until M8's prep, which is the transposition
+    // that broke resolution — keep a test on the pattern that used
+    // to be wrong so it cannot quietly come back.
+    let b: [u8] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x80]
+    match classify_random(b)
+        Resolvable => test.assert_eq(0, 1)
+        _          => test.assert_eq(1, 1)
+
+@test
+@satisfies("REQ-BLE-PRIV-004")
+fn test_classify_nrpa()
+    // 0x00 top-2 = 0b00 → NonResolvable.
+    let b: [u8] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x00]
+    match classify_random(b)
+        NonResolvable => test.assert_eq(1, 1)
+        _             => test.assert_eq(0, 1)
+
+@test
+fn test_hex_byte_roundtrip()
+    test.assert_eq(hex_byte(0), "00")
+    test.assert_eq(hex_byte(15), "0F")
+    test.assert_eq(hex_byte(255), "FF")
+    test.assert_eq(hex_byte(0xAB), "AB")
+
+@test
+fn test_format_bd_addr()
+    let b: [u8] = [0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x23]
+    test.assert_eq(format_bd_addr(b), "DE:AD:BE:EF:01:23")
+
+@test
+@satisfies("REQ-BLE-LL-064")
+fn test_top2_extraction_covers_all_four_patterns()
+    let pub_like: [u8] = [0, 0, 0, 0, 0, 0x00]
+    let nrpa_like: [u8] = [0, 0, 0, 0, 0, 0x3F]
+    let rpa_like: [u8] = [0, 0, 0, 0, 0, 0x60]
+    let rfu_like: [u8] = [0, 0, 0, 0, 0, 0xA0]
+    let stat_like: [u8] = [0, 0, 0, 0, 0, 0xFF]
+    test.assert_eq(addr_top2(pub_like), 0)
+    test.assert_eq(addr_top2(nrpa_like), 0)
+    test.assert_eq(addr_top2(rpa_like), 1)
+    test.assert_eq(addr_top2(rfu_like), 2)
+    test.assert_eq(addr_top2(stat_like), 3)

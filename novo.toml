@@ -1,0 +1,36 @@
+[package]
+name        = "noble-hci"
+version     = "0.1.0"
+description = "The Bluetooth HCI seam both the Host and the Controller read: opcode and event constants, one builder per command, one reader per field, the H4 frame codec, and the BdAddr and Uuid types.  Stateless: no state, no effects, no limits."
+license     = "Apache-2.0"
+stability   = "experimental"
+category    = "networking"
+layer       = "core"
+tags        = ["bluetooth", "ble", "hci", "h4", "uuid", "bd-addr", "codec"]
+repository  = "https://github.com/novolang/noble-hci"
+maintainers = ["novo-lang"]
+novo        = ">= 0.21.1"
+
+# A library: no `main`, so `novo pkg build` type-checks and effect-checks every
+# module under `src/` and writes no binary.
+
+# The embedded tier of orbit/ble, whose Host and Controller depend on this package.
+[tier]
+tier   = "embedded"
+target = "nrf52832-dk"
+
+# The modules were written as the embedded tier of orbit/ble and keep their `@tier(embedded)` marks.  165 of
+# their functions build a list or call `list.append`, which the embedded tier refuses (E4000); orbit/ble carries
+# the same findings under the same knob, and the package reports them as warnings until the codecs are written
+# over fixed-capacity buffers.
+sibling_check = "warn"
+
+[docs.pages]
+"README.md"    = "The HCI seam of the noble stack"
+"docs/hci.md"  = "Commands, events and frames"
+
+[publish]
+coverage_floor = 0
+
+[dependencies]
+# None.  Every module reads and writes bytes the caller holds; `std.bits` and `std.test` are the only imports.

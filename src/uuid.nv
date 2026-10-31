@@ -1,0 +1,266 @@
+// orbit/noble-hci/src/uuid.nv — BLE UUID type (16/32/128-bit unification).
+//
+// Per Bluetooth Core Vol 3 Part B §2.5.1, attribute types and
+// service UUIDs come in three widths:
+//
+//   16-bit   — Bluetooth-assigned (e.g. 0x180A "Device Information")
+//   32-bit   — rare; same expansion rule as 16-bit
+//   128-bit  — vendor-defined; full UUID on the wire
+//
+// 16- and 32-bit UUIDs are aliases for "base UUID with bytes 12..13
+// (or 12..15) overwritten":
+//
+//   Bluetooth_Base = 00000000-0000-1000-8000-00805F9B34FB
+//
+// On the wire UUIDs are little-endian (least-significant byte
+// first), so the base is laid out as:
+//
+//   FB 34 9B 5F 80 00 00 80 00 10 00 00 XX XX XX XX
+//                                       ↑↑↑↑↑↑↑↑↑↑↑
+//                                       short UUID overlay
+//
+// This module unifies the three forms.  Callers store 16-bit
+// UUIDs as Int and full 128-bit UUIDs as 16-byte [u8] in
+// little-endian.  `uuid_to_128` lifts a 16-bit alias to its
+// canonical full form for comparison; `uuid_eq_short_full`
+// answers equality cheaply without allocating.
+//
+// Satisfies: REQ-BLE-ATT-UUID-001 (UUID widths), -002 (base-UUID
+// expansion), -003 (LE wire layout).
+
+use std.test
+use std.bits
+
+// ── Bluetooth base UUID — least-significant byte first on the wire ──
+//
+// 00000000-0000-1000-8000-00805F9B34FB
+//
+// Sliced as: time_low (4) | time_mid (2) | time_hi_and_version (2)
+//          | clock_seq_hi_and_reserved (1) | clock_seq_low (1)
+//          | node (6).
+//
+// In LE byte order (LSB first) the array is:
+//   [FB, 34, 9B, 5F,  80, 00,  00, 80,  00, 10,  00, 00, 00, 00, 00, 00]
+//   bytes 0..5 = node + clock_seq_hi/low + time_hi (in LSB order)
+//   bytes 12..15 = time_low (slot for short UUID overlay)
+@tier(embedded)
+fn base_uuid_bytes() -> [u8]
+    [
+        0xFB, 0x34, 0x9B, 0x5F,
+        0x80, 0x00, 0x00, 0x80,
+        0x00, 0x10, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00]
+
+// ── 16-bit UUID → 128-bit canonical form (LE byte order) ────────────
+//
+// Overlay the 16-bit value into bytes 12..13 of the base UUID,
+// preserving the rest.  Used when comparing a short UUID against
+// an attribute's full 128-bit type field.
+@satisfies("REQ-BLE-ATT-UUID-002")
+@tier(embedded)
+fn uuid16_to_128(uuid16: Int) -> [u8]
+    [
+        0xFB, 0x34, 0x9B, 0x5F,
+        0x80, 0x00, 0x00, 0x80,
+        0x00, 0x10, 0x00, 0x00,
+        (uuid16 & 0xFF) as u8,
+        ((uuid16 >>> 8) & 0xFF) as u8,
+        0x00, 0x00]
+
+// ── 32-bit UUID → 128-bit canonical form (LE byte order) ────────────
+@satisfies("REQ-BLE-ATT-UUID-002")
+@tier(embedded)
+fn uuid32_to_128(uuid32: Int) -> [u8]
+    [
+        0xFB, 0x34, 0x9B, 0x5F,
+        0x80, 0x00, 0x00, 0x80,
+        0x00, 0x10, 0x00, 0x00,
+        (uuid32 & 0xFF) as u8,
+        ((uuid32 >>> 8) & 0xFF) as u8,
+        ((uuid32 >>> 16) & 0xFF) as u8,
+        ((uuid32 >>> 24) & 0xFF) as u8]
+
+// ── 128-bit UUID equality (LE byte order) ───────────────────────────
+//
+// Both inputs are 16-byte [u8].  Returns true iff every byte
+// matches.  Lengths shorter than 16 yield false rather than
+// reading past the end.
+@tier(embedded)
+@no_alloc
+fn uuid128_eq(a: [u8], b: [u8]) -> Bool
+    if list.len(a) != 16 or list.len(b) != 16
+        false
+    else
+        var i = 0
+        var equal = true
+        loop
+            if i >= 16
+                break
+            if a[i] as Int != b[i] as Int
+                equal = false
+                break
+            i = i + 1
+        equal
+
+// ── Cheap 16-bit-vs-128-bit comparison without allocating ───────────
+//
+// Returns true iff `full` is the base UUID with `short` overlaid
+// at bytes 12..13 (and bytes 14..15 = 0).  Avoids building the
+// full 128-bit form on the call site — the GATT db can hold
+// short UUIDs and still answer Find_By_Type_Value queries that
+// arrive as full 128-bit UUIDs over the air.
+@tier(embedded)
+@no_alloc
+fn uuid_eq_short_full(short: Int, full: [u8]) -> Bool
+    if list.len(full) != 16
+        false
+    else
+        // Bytes 0..11 must match the base.  Compare against the
+        // base array element-by-element to avoid a separate alloc.
+        var i = 0
+        var ok = true
+        loop
+            if i >= 12
+                break
+            if full[i] as Int != base_byte_at(i)
+                ok = false
+                break
+            i = i + 1
+        // Bytes 14..15 must be zero (32-bit UUIDs use the full
+        // 4-byte slot; a 16-bit alias must clear the upper two).
+        if ok and (full[14] as Int != 0 or full[15] as Int != 0)
+            ok = false
+        // Bytes 12..13 must be the short value (LE).
+        if ok
+            let lo = short & 0xFF
+            let hi = (short >>> 8) & 0xFF
+            if full[12] as Int != lo or full[13] as Int != hi
+                ok = false
+        ok
+
+// Inline base-byte lookup so `uuid_eq_short_full` doesn't realloc
+// the base array per comparison.  Hand-coded match keeps the
+// embedded codegen simple.
+@tier(embedded)
+@no_alloc
+fn base_byte_at(i: Int) -> Int
+    match i
+        0  => 0xFB
+        1  => 0x34
+        2  => 0x9B
+        3  => 0x5F
+        4  => 0x80
+        5  => 0x00
+        6  => 0x00
+        7  => 0x80
+        8  => 0x00
+        9  => 0x10
+        10 => 0x00
+        11 => 0x00
+        _  => 0x00
+
+// ── Encode / decode 16-bit UUID on the wire (LE) ────────────────────
+@satisfies("REQ-BLE-ATT-UUID-003")
+@tier(embedded)
+fn uuid16_to_le_bytes(uuid16: Int) -> [u8]
+    [
+        (uuid16 & 0xFF) as u8,
+        ((uuid16 >>> 8) & 0xFF) as u8]
+
+@satisfies("REQ-BLE-ATT-UUID-003")
+@tier(embedded)
+@no_alloc
+fn uuid16_from_le_bytes(b: [u8]) -> Int
+    if list.len(b) < 2
+        -1
+    else
+        (b[0] as Int) | ((b[1] as Int) << 8)
+
+// ── Tests ───────────────────────────────────────────────────────────
+
+@test
+fn test_base_uuid_shape()
+    let b = base_uuid_bytes()
+    test.assert_eq(list.len(b), 16)
+    // Sentinel bytes at fixed offsets in LE base UUID.
+    test.assert_eq(b[0] as Int, 0xFB)
+    // 0000180A-0000-1000-8000-00805F9B34FB, least significant octet
+    // first: ... 80 00 00 80 00 10 00 00 0A 18 00 00.
+    test.assert_eq(b[7] as Int, 0x80)
+    test.assert_eq(b[9] as Int, 0x10)
+
+@test
+@satisfies("REQ-BLE-ATT-UUID-002")
+fn test_uuid16_to_128_overlays_at_offset_12()
+    // Device Information service is 0x180A.  Expanded LE form
+    // should have base bytes 0..11, then 0A 18, then 00 00.
+    let full = uuid16_to_128(0x180A)
+    test.assert_eq(list.len(full), 16)
+    test.assert_eq(full[0] as Int, 0xFB)   // base
+    test.assert_eq(full[11] as Int, 0x00)   // base
+    test.assert_eq(full[12] as Int, 0x0A)   // short LSB
+    test.assert_eq(full[13] as Int, 0x18)   // short MSB
+    test.assert_eq(full[14] as Int, 0x00)
+    test.assert_eq(full[15] as Int, 0x00)
+
+@test
+@satisfies("REQ-BLE-ATT-UUID-002")
+fn test_uuid32_to_128_uses_all_four_bytes()
+    let full = uuid32_to_128(0xDEADBEEF)
+    test.assert_eq(full[12] as Int, 0xEF)
+    test.assert_eq(full[13] as Int, 0xBE)
+    test.assert_eq(full[14] as Int, 0xAD)
+    test.assert_eq(full[15] as Int, 0xDE)
+
+@test
+fn test_uuid128_eq_self()
+    let a = uuid16_to_128(0x2A29)
+    let b = uuid16_to_128(0x2A29)
+    test.assert_eq(uuid128_eq(a, b), true)
+
+@test
+fn test_uuid128_eq_differs_in_one_byte()
+    let a = uuid16_to_128(0x2A29)
+    let b = uuid16_to_128(0x2A24)
+    test.assert_eq(uuid128_eq(a, b), false)
+
+@test
+fn test_uuid128_eq_short_buffer_returns_false()
+    let a: [u8] = [0xFB, 0x34]
+    let b = uuid16_to_128(0x180A)
+    test.assert_eq(uuid128_eq(a, b), false)
+
+@test
+fn test_uuid_eq_short_full_match()
+    let full = uuid16_to_128(0x2A29)
+    test.assert_eq(uuid_eq_short_full(0x2A29, full), true)
+
+@test
+fn test_uuid_eq_short_full_short_mismatch()
+    let full = uuid16_to_128(0x2A29)
+    test.assert_eq(uuid_eq_short_full(0x2A24, full), false)
+
+@test
+fn test_uuid_eq_short_full_non_base_rejected()
+    // A vendor 128-bit UUID isn't a short alias — bytes 0..11
+    // diverge from the base.
+    let vendor: [u8] = [
+        0x11, 0x22, 0x33, 0x44,
+        0x55, 0x66, 0x77, 0x88,
+        0x99, 0xAA, 0xBB, 0xCC,
+        0x0A, 0x18, 0x00, 0x00]
+    test.assert_eq(uuid_eq_short_full(0x180A, vendor), false)
+
+@test
+@satisfies("REQ-BLE-ATT-UUID-003")
+fn test_uuid16_le_round_trip()
+    let b = uuid16_to_le_bytes(0x180A)
+    test.assert_eq(list.len(b), 2)
+    test.assert_eq(b[0] as Int, 0x0A)
+    test.assert_eq(b[1] as Int, 0x18)
+    test.assert_eq(uuid16_from_le_bytes(b), 0x180A)
+
+@test
+fn test_uuid16_from_le_short_buffer()
+    let b: [u8] = [0x0A]
+    test.assert_eq(uuid16_from_le_bytes(b), -1)

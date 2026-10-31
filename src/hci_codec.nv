@@ -1,0 +1,2527 @@
+// orbit/noble-hci/src/hci_codec.nv — end-to-end HCI command / event codec.
+//
+// The host-side layer that turns typed command intent
+// (HCI_Reset, LE_Set_Advertising_Enable(enable), ...) into
+// ready-to-transmit H4-framed byte sequences, and decomposes
+// incoming event byte sequences into (event_code, param_len,
+// params) triples the caller can dispatch on.
+//
+// Builds on:
+//   hci_frame            — OpCode packing, event-code constants
+//   hci_commands         — opcode_* + build_* helpers
+//   hci_h4               — H4 type-byte framing + length parsing
+//
+// Tier note: these are pure byte-manipulation functions that
+// run on the host side of the HCI boundary.  The controller-
+// side analogue (parse commands, emit events) lives in
+// `src/controller/hci_dispatcher.nv`.
+//
+// Finding-awareness (LLVM embedded):
+//   - Avoid `let x = fn_call(); x[i] as Int` — use inline form
+//     (finding #13 / #15).
+//   - Avoid let-binding register-getter returns (finding #16).
+//   - Command/event byte arrays are `[u8]` dynamic lists
+//     throughout; no `[u8; N]` (finding #15).
+//
+// Satisfies: REQ-BLE-HCI-001 (command wire format), REQ-BLE-HCI-002
+// (event wire format), REQ-BLE-HCI-003 (Command_Complete for every
+// command), REQ-BLE-H4-001 (type-byte prefix on the wire).
+
+use std.test
+use std.bits
+use hci_frame
+use hci_commands
+use hci_h4
+
+// ── Internal helpers ────────────────────────────────────────────────
+
+// Emit a u16 as two LE bytes (low, high).
+@tier(embedded)
+fn le16_bytes(v: Int) -> [u8]
+    let lo = (v & 0xFF) as u8
+    let hi = ((v >>> 8) & 0xFF) as u8
+    [lo, hi]
+
+// ── Build a complete HCI Command PDU (no H4 prefix) ─────────────────
+//
+// Returns: opcode_lo | opcode_hi | param_len | params[0..param_len]
+//
+// Caller then calls `frame_h4(PKT_COMMAND, cmd_bytes)` to get
+// the UART-wire bytes.
+
+@satisfies("REQ-BLE-HCI-001")
+@tier(embedded)
+fn build_command(opcode: Int, params: [u8]) -> [u8]
+    var hdr: [u8] = list.with_capacity(3 + list.len(params))
+    list.append(hdr, [(opcode & 0xFF) as u8, ((opcode >>> 8) & 0xFF) as u8, list.len(params) as u8])
+    list.append(hdr, params)
+    hdr
+
+// ── Build a complete HCI Command + H4 prefix in one shot ────────────
+
+@satisfies("REQ-BLE-H4-001")
+@tier(embedded)
+fn build_h4_command(opcode: Int, params: [u8]) -> [u8]
+    hci_h4.frame_h4(hci_h4.PKT_COMMAND, build_command(opcode, params))
+
+// ── Command builders for the supported subset ───────────────────────
+//
+// Each returns H4-framed wire bytes ready to push into the
+// UART transport.  The opcodes come from hci_commands; the
+// builders here package them with their parameter bytes.
+
+@satisfies("REQ-BLE-HCI-004")
+@tier(embedded)
+fn cmd_hci_reset() -> [u8]
+    build_h4_command(hci_commands.opcode_hci_reset(), [])
+
+@satisfies("REQ-BLE-HCI-005")
+@tier(embedded)
+fn cmd_read_bd_addr() -> [u8]
+    build_h4_command(hci_commands.opcode_read_bd_addr(), [])
+
+@satisfies("REQ-BLE-HCI-011")
+@satisfies("REQ-BLE-LL-066")
+@tier(embedded)
+fn cmd_le_read_buffer_size() -> [u8]
+    build_h4_command(hci_commands.opcode_le_read_buffer_size(), [])
+
+@satisfies("REQ-BLE-HCI-012")
+@tier(embedded)
+fn cmd_le_read_local_supported_features() -> [u8]
+    build_h4_command(hci_commands.opcode_le_read_local_supported_features(), [])
+
+@satisfies("REQ-BLE-HCI-013")
+@tier(embedded)
+fn cmd_le_set_random_address(bd_addr: [u8]) -> [u8]
+    // bd_addr must be 6 bytes; shorter ones produce an
+    // under-length command that the controller rejects.
+    build_h4_command(hci_commands.opcode_le_set_random_address(), bd_addr)
+
+@satisfies("REQ-BLE-HCI-016")
+@tier(embedded)
+fn cmd_le_set_advertising_data(ad: [u8]) -> [u8]
+    // LE_Set_Advertising_Data parameters: 1-byte length +
+    // 31-byte data field.  Pad with zeros if ad < 31 bytes.
+    // Passes the raw ad through; assumes the caller
+    // already prepared a 32-byte block with the length prefix.
+    build_h4_command(hci_commands.opcode_le_set_advertising_data(), ad)
+
+@satisfies("REQ-BLE-HCI-017")
+@tier(embedded)
+fn cmd_le_set_scan_response_data(data: [u8]) -> [u8]
+    build_h4_command(hci_commands.opcode_le_set_scan_response_data(), data)
+
+@satisfies("REQ-BLE-HCI-018")
+@tier(embedded)
+fn cmd_le_set_advertising_enable(enable: Bool) -> [u8]
+    let param = hci_commands.build_le_set_advertising_enable(enable)
+    build_h4_command(hci_commands.opcode_le_set_advertising_enable(), param)
+
+// ── Parse an incoming HCI Event PDU ─────────────────────────────────
+//
+// Takes raw event bytes (without the H4 0x04 prefix) and
+// returns the event code in the first byte.  Caller dispatches
+// on the code and reads subsequent bytes as params.  Returns
+// -1 if the buffer is too short.
+
+@satisfies("REQ-BLE-HCI-002")
+@tier(embedded)
+@no_alloc
+fn event_code(evt: [u8]) -> Int
+    if list.len(evt) < 1
+        -1
+    else
+        evt[0] as Int
+
+@satisfies("REQ-BLE-HCI-002")
+@tier(embedded)
+@no_alloc
+fn event_param_len(evt: [u8]) -> Int
+    if list.len(evt) < 2
+        -1
+    else
+        evt[1] as Int
+
+// ── Command Complete event shape (Vol 4 Part E §7.7.14) ─────────────
+//
+//   evt[0] = 0x0E (Command_Complete code)
+//   evt[1] = param_len (≥ 3)
+//   evt[2] = Num_HCI_Command_Packets (controller's current
+//            available slot count)
+//   evt[3] = opcode_lo
+//   evt[4] = opcode_hi
+//   evt[5..] = Return_Parameters (varies per command)
+
+@satisfies("REQ-BLE-HCI-003")
+@tier(embedded)
+@no_alloc
+fn is_command_complete(evt: [u8]) -> Bool
+    event_code(evt) == hci_frame.EVT_COMMAND_COMPLETE
+
+@satisfies("REQ-BLE-HCI-003")
+@tier(embedded)
+@no_alloc
+fn command_complete_opcode(evt: [u8]) -> Int
+    if list.len(evt) < 5
+        -1
+    else
+        // Opcode is at bytes [3..4] LE.
+        (evt[3] as Int) | ((evt[4] as Int) << 8)
+
+// The Status return parameter of a Command Complete event, evt[5].
+// Status is the first return parameter and is always present, even
+// when the command fails ([Vol 4] Part E, Section 4.5).  -1 when the event carries no return parameters.
+@satisfies("REQ-BLE-HCI-003")
+@tier(embedded)
+@no_alloc
+fn command_complete_status(evt: [u8]) -> Int
+    if list.len(evt) < 6
+        -1
+    else
+        evt[5] as Int
+
+// ── Command Status event, [Vol 4] Part E, Section 7.7.15 ────────────
+//
+//   evt[0] = 0x0F (Command_Status code)
+//   evt[1] = param_len (4)
+//   evt[2] = Status
+//   evt[3] = Num_HCI_Command_Packets
+//   evt[4] = opcode_lo
+//   evt[5] = opcode_hi
+
+@tier(embedded)
+@no_alloc
+fn is_command_status(evt: [u8]) -> Bool
+    event_code(evt) == hci_frame.EVT_COMMAND_STATUS
+
+@tier(embedded)
+@no_alloc
+fn command_status_opcode(evt: [u8]) -> Int
+    if list.len(evt) < 6
+        -1
+    else
+        (evt[4] as Int) | ((evt[5] as Int) << 8)
+
+@tier(embedded)
+@no_alloc
+fn command_status_status(evt: [u8]) -> Int
+    if list.len(evt) < 3
+        -1
+    else
+        evt[2] as Int
+
+// The opcode a Command Complete or Command Status event answers,
+// or -1 for any other event.
+@satisfies("REQ-BLE-HCI-003")
+@tier(embedded)
+@no_alloc
+fn answered_opcode(evt: [u8]) -> Int
+    if is_command_complete(evt)
+        command_complete_opcode(evt)
+    else if is_command_status(evt)
+        command_status_opcode(evt)
+    else
+        -1
+
+// The Status a Command Complete or Command Status event reports,
+// or -1 for any other event.
+@tier(embedded)
+@no_alloc
+fn answered_status(evt: [u8]) -> Int
+    if is_command_complete(evt)
+        command_complete_status(evt)
+    else if is_command_status(evt)
+        command_status_status(evt)
+    else
+        -1
+
+// The Subevent_Code of an LE Meta event ([Vol 4] Part E,
+// Section 7.7.65), evt[2], or -1 for any other event.
+@tier(embedded)
+@no_alloc
+fn le_meta_subevent(evt: [u8]) -> Int
+    if event_code(evt) != hci_frame.EVT_LE_META_EVENT or list.len(evt) < 3
+        -1
+    else
+        evt[2] as Int
+
+// ── LE Advertising Report event, [Vol 4] Part E, Section 7.7.65.2 ───
+//
+//   evt[0] = 0x3E (LE Meta event)
+//   evt[1] = Parameter_Total_Length
+//   evt[2] = 0x02 (Subevent_Code)
+//   evt[3] = Num_Reports, 0x01 to 0x19
+//   then, report by report, Event_Type, Address_Type, Address (6),
+//   Data_Length, Data, RSSI
+//
+// Arrayed parameters are sent element by element
+// ([Vol 4] Part E, Section 5.2): Event_Type[0], Address_Type[0], ...
+// RSSI[0], then Event_Type[1], and so on.
+
+const LE_SUBEVENT_ADVERTISING_REPORT = 0x02
+
+// Event_Type values: the legacy advertising PDU the report carries.
+const ADV_REPORT_ADV_IND = 0x00
+
+const ADV_REPORT_ADV_DIRECT_IND = 0x01
+
+const ADV_REPORT_ADV_SCAN_IND = 0x02
+
+const ADV_REPORT_ADV_NONCONN_IND = 0x03
+
+const ADV_REPORT_SCAN_RSP = 0x04
+
+// RSSI 0x7F: RSSI is not available.
+const ADV_REPORT_RSSI_NOT_AVAILABLE = 0x7F
+
+// Data_Length is 0x00 to 0x1F.
+const ADV_REPORT_DATA_MAX = 31
+
+// One report of an LE Advertising Report event.  `address` is the
+// six octets as the event carries them, least significant first;
+// `data` is advertising or scan response data formatted as AD
+// structures ([Vol 3] Part C, Section 11); `rssi` is the RSSI octet,
+// a signed dBm value or ADV_REPORT_RSSI_NOT_AVAILABLE.
+struct AdvertisingReport
+    event_type: Int
+    address_type: Int
+    address: [u8]
+    data: [u8]
+    rssi: Int
+
+// The reports of an LE Advertising Report event, given without its HCI
+// packet indicator, or None when the event is another one or its
+// parameters do not add up: a Num_Reports outside 1 to 0x19, a
+// Data_Length over 31, or a length that disagrees with
+// Parameter_Total_Length.
+@tier(embedded)
+fn le_advertising_reports(evt: [u8]) -> ?[AdvertisingReport]
+    let n = list.len(evt)
+    if le_meta_subevent(evt) != LE_SUBEVENT_ADVERTISING_REPORT or n < 4
+        return None
+    if evt[1] as Int != n - 2
+        return None
+    let count = evt[3] as Int
+    if count < 1 or count > 0x19
+        return None
+    var reports: [AdvertisingReport] = []
+    var at = 4
+    for _ in 0..count
+        // Event_Type, Address_Type, Address and Data_Length: 9 octets.
+        if at + 9 > n
+            return None
+        let data_len = evt[at + 8] as Int
+        if data_len > ADV_REPORT_DATA_MAX or at + 9 + data_len + 1 > n
+            return None
+        let data_end = at + 9 + data_len
+        list.push(reports, AdvertisingReport {
+            event_type: evt[at] as Int,
+            address_type: evt[at + 1] as Int,
+            address: evt[at + 2:at + 8],
+            data: evt[at + 9:data_end],
+            rssi: evt[data_end] as Int })
+        at = data_end + 1
+    if at != n
+        return None
+    Some(reports)
+
+// ── LE Connection Complete event, [Vol 4] Part E, Section 7.7.65.1 ──
+//
+//   evt[0] = 0x3E (LE Meta event)
+//   evt[1] = Parameter_Total_Length, 19
+//   evt[2] = 0x01 (Subevent_Code)
+//   then Status, Connection_Handle (2), Role, Peer_Address_Type,
+//   Peer_Address (6), Connection_Interval (2), Peripheral_Latency (2),
+//   Supervision_Timeout (2), Central_Clock_Accuracy
+//
+// The LE Enhanced Connection Complete event [v1] (Section 7.7.65.10,
+// Subevent_Code 0x0A) carries Local_Resolvable_Private_Address and
+// Peer_Resolvable_Private_Address, 6 octets each, after Peer_Address;
+// the rest is the same.  A Controller sends one of the two, the enhanced
+// one only when the Host unmasks it.
+
+const LE_SUBEVENT_CONNECTION_COMPLETE = 0x01
+
+const LE_SUBEVENT_ENHANCED_CONNECTION_COMPLETE = 0x0A
+
+// Role: the Controller is the Central or the Peripheral of the new
+// connection.
+const CONNECTION_ROLE_CENTRAL = 0x00
+
+const CONNECTION_ROLE_PERIPHERAL = 0x01
+
+// Status Advertising Timeout (0x3C): high duty cycle directed
+// advertising ended without a connection ([Vol 4] Part E, Section
+// 7.8.9).
+const STATUS_ADVERTISING_TIMEOUT = 0x3C
+
+// The parameters of an LE Connection Complete event or LE Enhanced
+// Connection Complete event [v1].  `peer_address` is least significant
+// octet first; the three timing values are in the units the event gives
+// them.
+struct LeConnectionComplete
+    status: Int
+    connection_handle: Int
+    role: Int
+    peer_address_type: Int
+    peer_address: [u8]
+    connection_interval: Int
+    peripheral_latency: Int
+    supervision_timeout: Int
+
+@tier(embedded)
+@no_alloc
+fn le16_at(evt: [u8], at: Int) -> Int
+    (evt[at] as Int) | ((evt[at + 1] as Int) << 8)
+
+// A 24-bit and a 32-bit field, least significant octet first.
+@tier(embedded)
+@no_alloc
+fn le24_at(evt: [u8], at: Int) -> Int
+    (evt[at] as Int) | ((evt[at + 1] as Int) << 8) | ((evt[at + 2] as Int) << 16)
+
+@tier(embedded)
+@no_alloc
+fn le32_at(evt: [u8], at: Int) -> Int
+    (evt[at] as Int) | ((evt[at + 1] as Int) << 8) | ((evt[at + 2] as Int) << 16) | ((evt[at + 3] as Int) << 24)
+
+// The parameters of an LE Connection Complete event or LE Enhanced
+// Connection Complete event [v1], given without its HCI packet
+// indicator, or None for any other event or one whose length is not its
+// subevent's.
+@tier(embedded)
+fn le_connection_complete(evt: [u8]) -> ?LeConnectionComplete
+    let sub = le_meta_subevent(evt)
+    let n = list.len(evt)
+    // Octets between Peer_Address and Connection_Interval.
+    let skip = if sub == LE_SUBEVENT_ENHANCED_CONNECTION_COMPLETE then 12 else 0
+    if sub != LE_SUBEVENT_CONNECTION_COMPLETE and sub != LE_SUBEVENT_ENHANCED_CONNECTION_COMPLETE
+        return None
+    if n != 21 + skip or evt[1] as Int != n - 2
+        return None
+    let t = 13 + skip
+    Some(LeConnectionComplete {
+        status: evt[3] as Int,
+        connection_handle: le16_at(evt, 4) & 0x0FFF,
+        role: evt[6] as Int,
+        peer_address_type: evt[7] as Int,
+        peer_address: evt[8:14],
+        connection_interval: le16_at(evt, t + 1),
+        peripheral_latency: le16_at(evt, t + 3),
+        supervision_timeout: le16_at(evt, t + 5) })
+
+// ── Disconnection Complete event, [Vol 4] Part E, Section 7.7.5 ─────
+//
+//   evt[0] = 0x05, evt[1] = 4, then Status, Connection_Handle (2),
+//   Reason
+
+struct DisconnectionComplete
+    status: Int
+    connection_handle: Int
+    reason: Int
+
+// The parameters of a Disconnection Complete event, given without its
+// HCI packet indicator, or None for any other event.
+@tier(embedded)
+fn disconnection_complete(evt: [u8]) -> ?DisconnectionComplete
+    if event_code(evt) != hci_frame.EVT_DISCONNECTION_COMPLETE or list.len(evt) != 6 or evt[1] as Int != 4
+        None
+    else
+        Some(DisconnectionComplete {
+            status: evt[2] as Int,
+            connection_handle: le16_at(evt, 3) & 0x0FFF,
+            reason: evt[5] as Int })
+
+// ── HCI ACL Data packets, [Vol 4] Part E, Section 5.4.2 ─────────────
+//
+//   octets 0-1  Handle (12 bits), Packet_Boundary_Flag (bits 4-5 of
+//               octet 1), Broadcast_Flag (bits 6-7 of octet 1)
+//   octets 2-3  Data_Total_Length
+//   then        Data_Total_Length octets of data
+//
+// On an LE-U logical link the Host starts an L2CAP PDU with
+// Packet_Boundary_Flag 0b00 and continues it with 0b01; the Controller
+// starts one with 0b10 and continues it with 0b01.  Broadcast_Flag is
+// 0b00, point-to-point.
+
+const ACL_PB_FIRST_NON_FLUSHABLE = 0x00
+
+const ACL_PB_CONTINUING = 0x01
+
+const ACL_PB_FIRST_FLUSHABLE = 0x02
+
+const ACL_HEADER_LEN = 4
+
+// Hosts and Controllers shall be able to accept HCI ACL Data packets
+// with up to 27 octets of data on an LE-U logical link (same section).
+const LE_ACL_DATA_MIN = 27
+
+// One HCI ACL Data packet: the header fields and the data.
+struct AclDataPacket
+    connection_handle: Int
+    packet_boundary: Int
+    broadcast: Int
+    data: [u8]
+
+// The HCI ACL Data packet `pkt`, given without its HCI packet indicator,
+// or None when it is shorter than its header or Data_Total_Length
+// disagrees with the octets that follow.
+@tier(embedded)
+fn acl_data_packet(pkt: [u8]) -> ?AclDataPacket
+    let n = list.len(pkt)
+    if n < ACL_HEADER_LEN
+        return None
+    let total = le16_at(pkt, 2)
+    if n != ACL_HEADER_LEN + total
+        return None
+    Some(AclDataPacket {
+        connection_handle: le16_at(pkt, 0) & 0x0FFF,
+        packet_boundary: ((pkt[1] as Int) >>> 4) & 0x03,
+        broadcast: ((pkt[1] as Int) >>> 6) & 0x03,
+        data: pkt[ACL_HEADER_LEN:n] })
+
+// An HCI ACL Data packet with its HCI packet indicator, point-to-point,
+// for `connection_handle` with `packet_boundary` and `data`.
+@tier(embedded)
+fn build_h4_acl(connection_handle: Int, packet_boundary: Int, data: [u8]) -> [u8]
+    let n = list.len(data)
+    var pkt: [u8] = list.with_capacity(5 + list.len(data))
+    list.append(pkt, [hci_h4.PKT_ACL, (connection_handle & 0xFF) as u8, (((connection_handle >>> 8) & 0x0F) | ((packet_boundary & 0x03) << 4)) as u8,
+        (n & 0xFF) as u8, ((n >>> 8) & 0xFF) as u8])
+    list.append(pkt, data)
+    pkt
+
+// ── Number Of Completed Packets event, [Vol 4] Part E, Section 7.7.19 ─
+//
+//   evt[0] = 0x13, evt[1] = Parameter_Total_Length, evt[2] = Num_Handles,
+//   then Handle[i] (2) and Num_Completed_Packets[i] (2), element by
+//   element: Handle[0], Num_Completed_Packets[0], Handle[1], ...
+//   ([Vol 4] Part E, Section 5.2).
+
+// The packets one Handle has completed since the last event.
+struct CompletedPackets
+    connection_handle: Int
+    count: Int
+
+// The pairs of a Number Of Completed Packets event, given without its
+// HCI packet indicator, or None for any other event or one whose length
+// disagrees with Num_Handles.
+@tier(embedded)
+fn number_of_completed_packets(evt: [u8]) -> ?[CompletedPackets]
+    let n = list.len(evt)
+    if event_code(evt) != hci_frame.EVT_NUMBER_OF_COMPLETED_PACKETS or n < 3
+        return None
+    let count = evt[2] as Int
+    if evt[1] as Int != n - 2 or n != 3 + 4 * count
+        return None
+    var out: [CompletedPackets] = []
+    for i in 0..count
+        let at = 3 + 4 * i
+        list.push(out, CompletedPackets { connection_handle: le16_at(evt, at) & 0x0FFF, count: le16_at(evt, at + 2) })
+    Some(out)
+
+// ── LE Connection Update Complete event, [Vol 4] Part E, Section 7.7.65.3
+//
+//   evt[0] = 0x3E, evt[1] = 10, evt[2] = 0x03, then Status,
+//   Connection_Handle (2), Connection_Interval (2), Peripheral_Latency
+//   (2), Supervision_Timeout (2)
+
+const LE_SUBEVENT_CONNECTION_UPDATE_COMPLETE = 0x03
+
+struct LeConnectionUpdateComplete
+    status: Int
+    connection_handle: Int
+    connection_interval: Int
+    peripheral_latency: Int
+    supervision_timeout: Int
+
+@tier(embedded)
+fn le_connection_update_complete(evt: [u8]) -> ?LeConnectionUpdateComplete
+    if le_meta_subevent(evt) != LE_SUBEVENT_CONNECTION_UPDATE_COMPLETE or list.len(evt) != 12 or evt[1] as Int != 10
+        None
+    else
+        Some(LeConnectionUpdateComplete {
+            status: evt[3] as Int,
+            connection_handle: le16_at(evt, 4) & 0x0FFF,
+            connection_interval: le16_at(evt, 6),
+            peripheral_latency: le16_at(evt, 8),
+            supervision_timeout: le16_at(evt, 10) })
+
+// ── LE Long Term Key Request event, [Vol 4] Part E, Section 7.7.65.5 ─
+//
+//   evt[0] = 0x3E, evt[1] = 13, evt[2] = 0x05, then Connection_Handle
+//   (2), Random_Number (8), Encrypted_Diversifier (2)
+
+const LE_SUBEVENT_LONG_TERM_KEY_REQUEST = 0x05
+
+struct LeLongTermKeyRequest
+    connection_handle: Int
+    random_number: [u8]
+    encrypted_diversifier: Int
+
+@tier(embedded)
+fn le_long_term_key_request(evt: [u8]) -> ?LeLongTermKeyRequest
+    if le_meta_subevent(evt) != LE_SUBEVENT_LONG_TERM_KEY_REQUEST or list.len(evt) != 15 or evt[1] as Int != 13
+        None
+    else
+        Some(LeLongTermKeyRequest {
+            connection_handle: le16_at(evt, 3) & 0x0FFF,
+            random_number: evt[5:13],
+            encrypted_diversifier: le16_at(evt, 13) })
+
+// ── LE Remote Connection Parameter Request event, [Vol 4] Part E,
+//    Section 7.7.65.6
+//
+//   evt[0] = 0x3E, evt[1] = 11, evt[2] = 0x06, then Connection_Handle
+//   (2), Interval_Min (2), Interval_Max (2), Max_Latency (2), Timeout (2)
+
+const LE_SUBEVENT_REMOTE_CONNECTION_PARAMETER_REQUEST = 0x06
+
+struct LeRemoteConnectionParameterRequest
+    connection_handle: Int
+    interval_min: Int
+    interval_max: Int
+    max_latency: Int
+    timeout: Int
+
+@tier(embedded)
+fn le_remote_connection_parameter_request(evt: [u8]) -> ?LeRemoteConnectionParameterRequest
+    if le_meta_subevent(evt) != LE_SUBEVENT_REMOTE_CONNECTION_PARAMETER_REQUEST or list.len(evt) != 13 or evt[1] as Int != 11
+        None
+    else
+        Some(LeRemoteConnectionParameterRequest {
+            connection_handle: le16_at(evt, 3) & 0x0FFF,
+            interval_min: le16_at(evt, 5),
+            interval_max: le16_at(evt, 7),
+            max_latency: le16_at(evt, 9),
+            timeout: le16_at(evt, 11) })
+
+// ── Encryption Change event, [Vol 4] Part E, Section 7.7.8 ──────────
+//
+// The event code of the Encryption Change event [v1] and of the
+// Encryption Key Refresh Complete event (Section 7.7.39), which the
+// Security Manager reads; the Host hands both to it unread.
+
+const EVT_ENCRYPTION_KEY_REFRESH_COMPLETE = 0x30
+
+// Whether `evt` is one of the events that report a change of the link's
+// encryption to the Host: Encryption Change, Encryption Key Refresh
+// Complete, or the LE Long Term Key Request event that asks the Host for
+// a key.
+@tier(embedded)
+@no_alloc
+fn is_encryption_event(evt: [u8]) -> Bool
+    let code = event_code(evt)
+    code == hci_frame.EVT_ENCRYPTION_CHANGE or code == EVT_ENCRYPTION_KEY_REFRESH_COMPLETE or le_meta_subevent(evt) == LE_SUBEVENT_LONG_TERM_KEY_REQUEST
+
+// The outcome of an encryption change on a connection: the Encryption
+// Change event [v1] (Section 7.7.8: Status, Connection_Handle,
+// Encryption_Enabled) or the Encryption Key Refresh Complete event
+// (Section 7.7.39: Status, Connection_Handle), which reports a link that
+// stays encrypted with a new key.  `enabled` is true when the link is
+// encrypted after the change: a Status of Success with
+// Encryption_Enabled not 0x00, or a refresh with Status Success.
+struct EncryptionChange
+    status: Int
+    connection_handle: Int
+    enabled: Bool
+
+@tier(embedded)
+fn encryption_change(evt: [u8]) -> ?EncryptionChange
+    let code = event_code(evt)
+    if code == hci_frame.EVT_ENCRYPTION_CHANGE and list.len(evt) == 6 and evt[1] as Int == 4
+        let status = evt[2] as Int
+        Some(EncryptionChange { status: status, connection_handle: le16_at(evt, 3) & 0x0FFF, enabled: status == 0 and evt[5] as Int != 0 })
+    else if code == EVT_ENCRYPTION_KEY_REFRESH_COMPLETE and list.len(evt) == 5 and evt[1] as Int == 3
+        let status = evt[2] as Int
+        Some(EncryptionChange { status: status, connection_handle: le16_at(evt, 3) & 0x0FFF, enabled: status == 0 })
+    else
+        None
+
+// The LE_ACL_Data_Packet_Length and Total_Num_LE_ACL_Data_Packets of the
+// LE Read Buffer Size command [v1] ([Vol 4] Part E, Section 7.8.2), from
+// the return parameters that follow Status.
+struct LeBufferSize
+    acl_data_packet_length: Int
+    total_acl_data_packets: Int
+
+@tier(embedded)
+fn le_buffer_size(return_parameters: [u8]) -> ?LeBufferSize
+    if list.len(return_parameters) < 3
+        None
+    else
+        Some(LeBufferSize {
+            acl_data_packet_length: le16_at(return_parameters, 0),
+            total_acl_data_packets: return_parameters[2] as Int })
+
+// ── Return parameters of the isochronous commands ───────────────────
+//
+// The return parameters of a Command Complete event follow Status, so
+// each decoder takes the octets after it (`command_complete_return_parameters`
+// cuts them off the event), as `le_buffer_size` does.  A list whose length
+// is not the one the command's return parameters have is refused: their
+// sizes are fixed ([Vol 4] Part E, Section 7.8.2 and Sections 7.8.96 to
+// 7.8.116), except the list of Connection_Handle[i] of the LE Set CIG
+// Parameters command, whose length follows CIS_Count.
+
+// The return parameters of a Command Complete event, the octets after
+// Status, or an empty list when the event is shorter than the opcode and
+// Status.
+@tier(embedded)
+fn command_complete_return_parameters(evt: [u8]) -> [u8]
+    if list.len(evt) < 6
+        []
+    else
+        evt[6:]
+
+// The return parameters of the LE Read Buffer Size command [v2]
+// ([Vol 4] Part E, Section 7.8.2): the ACL half of the [v1] form, then
+// ISO_Data_Packet_Length and Total_Num_ISO_Data_Packets.  Both ISO values
+// are non-zero on a Controller that supports HCI ISO Data packets.
+@value
+struct LeBufferSizeV2
+    acl_data_packet_length: Int
+    total_acl_data_packets: Int
+    iso_data_packet_length: Int
+    total_iso_data_packets: Int
+
+@satisfies("REQ-BLE-HCI-057")
+@tier(embedded)
+fn le_buffer_size_v2(return_parameters: [u8]) -> ?LeBufferSizeV2
+    if list.len(return_parameters) != 6
+        None
+    else
+        Some(LeBufferSizeV2 {
+            acl_data_packet_length: le16_at(return_parameters, 0),
+            total_acl_data_packets: return_parameters[2] as Int,
+            iso_data_packet_length: le16_at(return_parameters, 3),
+            total_iso_data_packets: return_parameters[5] as Int })
+
+// The return parameters of the LE Read ISO TX Sync command ([Vol 4] Part
+// E, Section 7.8.96): Connection_Handle, Packet_Sequence_Number,
+// TX_Time_Stamp (microseconds) and Time_Offset (microseconds, 3 octets).
+@value
+struct IsoTxSync
+    connection_handle: Int
+    packet_sequence_number: Int
+    tx_time_stamp: Int
+    time_offset: Int
+
+@satisfies("REQ-BLE-HCI-057")
+@tier(embedded)
+fn le_read_iso_tx_sync(return_parameters: [u8]) -> ?IsoTxSync
+    if list.len(return_parameters) != 11
+        None
+    else
+        Some(IsoTxSync {
+            connection_handle: le16_at(return_parameters, 0) & 0x0FFF,
+            packet_sequence_number: le16_at(return_parameters, 2),
+            tx_time_stamp: le32_at(return_parameters, 4),
+            time_offset: le24_at(return_parameters, 8) })
+
+// The return parameters of the LE Set CIG Parameters command and its
+// Test form ([Vol 4] Part E, Sections 7.8.97 and 7.8.98): CIG_ID,
+// CIS_Count and Connection_Handle[i], one handle for each CIS of the
+// command, in the order of its CIS_ID[i].
+struct CigParametersReturn
+    cig_id: Int
+    connection_handles: [Int]
+
+@satisfies("REQ-BLE-HCI-057")
+@tier(embedded)
+fn le_set_cig_parameters_return(return_parameters: [u8]) -> ?CigParametersReturn
+    if list.len(return_parameters) < 2
+        return None
+    let n = return_parameters[1] as Int
+    if list.len(return_parameters) != 2 + 2 * n
+        return None
+    var handles: [Int] = []
+    for i in 0..n
+        list.push(handles, le16_at(return_parameters, 2 + 2 * i) & 0x0FFF)
+    Some(CigParametersReturn { cig_id: return_parameters[0] as Int, connection_handles: handles })
+
+// The Connection_Handle that the LE Reject CIS Request, LE Setup ISO
+// Data Path, LE Remove ISO Data Path, LE ISO Transmit Test and LE ISO
+// Receive Test commands return after Status ([Vol 4] Part E, Sections
+// 7.8.102 and 7.8.109 to 7.8.112), or None when the list is not two
+// octets.
+@satisfies("REQ-BLE-HCI-057")
+@tier(embedded)
+fn iso_connection_handle_return(return_parameters: [u8]) -> ?Int
+    if list.len(return_parameters) != 2
+        None
+    else
+        Some(le16_at(return_parameters, 0) & 0x0FFF)
+
+// The CIG_ID that the LE Remove CIG command returns after Status, and
+// the BIG_Handle that the LE BIG Terminate Sync command returns after it
+// ([Vol 4] Part E, Sections 7.8.100 and 7.8.107): one octet.
+@satisfies("REQ-BLE-HCI-057")
+@tier(embedded)
+fn iso_group_id_return(return_parameters: [u8]) -> ?Int
+    if list.len(return_parameters) != 1
+        None
+    else
+        Some(return_parameters[0] as Int)
+
+// The return parameters of the LE ISO Read Test Counters and LE ISO Test
+// End commands ([Vol 4] Part E, Sections 7.8.113 and 7.8.114):
+// Connection_Handle and the three 4-octet counts.
+@value
+struct IsoTestCounters
+    connection_handle: Int
+    received_sdu_count: Int
+    missed_sdu_count: Int
+    failed_sdu_count: Int
+
+@satisfies("REQ-BLE-HCI-057")
+@tier(embedded)
+fn iso_test_counters(return_parameters: [u8]) -> ?IsoTestCounters
+    if list.len(return_parameters) != 14
+        None
+    else
+        Some(IsoTestCounters {
+            connection_handle: le16_at(return_parameters, 0) & 0x0FFF,
+            received_sdu_count: le32_at(return_parameters, 2),
+            missed_sdu_count: le32_at(return_parameters, 6),
+            failed_sdu_count: le32_at(return_parameters, 10) })
+
+// The return parameters of the LE Read ISO Link Quality command ([Vol
+// 4] Part E, Section 7.8.116): Connection_Handle and the seven 4-octet
+// counters of packets.
+@value
+struct IsoLinkQuality
+    connection_handle: Int
+    tx_unacked_packets: Int
+    tx_flushed_packets: Int
+    tx_last_subevent_packets: Int
+    retransmitted_packets: Int
+    crc_error_packets: Int
+    rx_unreceived_packets: Int
+    duplicate_packets: Int
+
+@satisfies("REQ-BLE-HCI-057")
+@tier(embedded)
+fn iso_link_quality(return_parameters: [u8]) -> ?IsoLinkQuality
+    if list.len(return_parameters) != 30
+        None
+    else
+        Some(IsoLinkQuality {
+            connection_handle: le16_at(return_parameters, 0) & 0x0FFF,
+            tx_unacked_packets: le32_at(return_parameters, 2),
+            tx_flushed_packets: le32_at(return_parameters, 6),
+            tx_last_subevent_packets: le32_at(return_parameters, 10),
+            retransmitted_packets: le32_at(return_parameters, 14),
+            crc_error_packets: le32_at(return_parameters, 18),
+            rx_unreceived_packets: le32_at(return_parameters, 22),
+            duplicate_packets: le32_at(return_parameters, 26) })
+
+// ── Isochronous channel events, [Vol 4] Part E, Section 7.7.65.25 to
+//    7.7.65.30 and Section 7.7.65.34 ────────────────────────────────
+//
+// Eight LE Meta subevents belong to the isochronous channels.  Like the
+// periodic advertising events above, each decoder takes the event packet
+// without its HCI packet indicator and answers None for another subevent,
+// for an event whose Parameter_Total_Length is not the one its parameters
+// add up to, and for an event whose length disagrees with the Num_BIS it
+// carries.  A Connection_Handle is 12 bits meaningful and is masked to
+// them.
+
+const LE_SUBEVENT_CIS_ESTABLISHED = 0x19
+
+const LE_SUBEVENT_CIS_REQUEST = 0x1A
+
+const LE_SUBEVENT_CREATE_BIG_COMPLETE = 0x1B
+
+const LE_SUBEVENT_TERMINATE_BIG_COMPLETE = 0x1C
+
+const LE_SUBEVENT_BIG_SYNC_ESTABLISHED = 0x1D
+
+const LE_SUBEVENT_BIG_SYNC_LOST = 0x1E
+
+const LE_SUBEVENT_BIG_INFO_ADVERTISING_REPORT = 0x22
+
+const LE_SUBEVENT_CIS_ESTABLISHED_V2 = 0x2A
+
+// Whether `evt` is an LE Meta event of subevent `subevent` that is
+// `total` octets long, header included, and whose Parameter_Total_Length
+// agrees with that.
+@tier(embedded)
+@no_alloc
+fn iso_event_shape(evt: [u8], subevent: Int, total: Int) -> Bool
+    event_code(evt) == hci_frame.EVT_LE_META_EVENT and list.len(evt) == total and evt[1] as Int == total - 2 and le_meta_subevent(evt) == subevent
+
+// ── LE CIS Established event, Section 7.7.65.25 ─────────────────────
+//
+//   evt[0] = 0x3E, evt[1] = length, evt[2] = 0x19 [v1] or 0x2A [v2],
+//   then Status, Connection_Handle (2), CIG_Sync_Delay (3),
+//   CIS_Sync_Delay (3), Transport_Latency_C_To_P (3),
+//   Transport_Latency_P_To_C (3), PHY_C_To_P, PHY_P_To_C, NSE,
+//   BN_C_To_P, BN_P_To_C, FT_C_To_P, FT_P_To_C, Max_PDU_C_To_P (2),
+//   Max_PDU_P_To_C (2), ISO_Interval (2); the [v2] form goes on with
+//   Sub_Interval (3), Max_SDU_C_To_P (2), Max_SDU_P_To_C (2),
+//   SDU_Interval_C_To_P (3), SDU_Interval_P_To_C (3) and Framing.
+//
+// `v2` says which of the two forms was decoded; the fields only the
+// [v2] form carries are 0 in the first.  The delays, latencies and the
+// two SDU intervals are in microseconds, ISO_Interval in 1.25 ms units.
+@value
+struct CisEstablished
+    v2: Bool
+    status: Int
+    connection_handle: Int
+    cig_sync_delay: Int
+    cis_sync_delay: Int
+    transport_latency_c_to_p: Int
+    transport_latency_p_to_c: Int
+    phy_c_to_p: Int
+    phy_p_to_c: Int
+    nse: Int
+    bn_c_to_p: Int
+    bn_p_to_c: Int
+    ft_c_to_p: Int
+    ft_p_to_c: Int
+    max_pdu_c_to_p: Int
+    max_pdu_p_to_c: Int
+    iso_interval: Int
+    sub_interval: Int
+    max_sdu_c_to_p: Int
+    max_sdu_p_to_c: Int
+    sdu_interval_c_to_p: Int
+    sdu_interval_p_to_c: Int
+    framing: Int
+
+// The LE CIS Established event packet is 31 octets in its [v1] form and
+// 45 in its [v2] form.
+const CIS_ESTABLISHED_LENGTH = 31
+
+const CIS_ESTABLISHED_V2_LENGTH = 45
+
+@satisfies("REQ-BLE-HCI-058")
+@tier(embedded)
+fn le_cis_established(evt: [u8]) -> ?CisEstablished
+    let v2 = iso_event_shape(evt, LE_SUBEVENT_CIS_ESTABLISHED_V2, CIS_ESTABLISHED_V2_LENGTH)
+    if not v2 and not iso_event_shape(evt, LE_SUBEVENT_CIS_ESTABLISHED, CIS_ESTABLISHED_LENGTH)
+        return None
+    Some(CisEstablished {
+        v2: v2,
+        status: evt[3] as Int,
+        connection_handle: le16_at(evt, 4) & 0x0FFF,
+        cig_sync_delay: le24_at(evt, 6),
+        cis_sync_delay: le24_at(evt, 9),
+        transport_latency_c_to_p: le24_at(evt, 12),
+        transport_latency_p_to_c: le24_at(evt, 15),
+        phy_c_to_p: evt[18] as Int,
+        phy_p_to_c: evt[19] as Int,
+        nse: evt[20] as Int,
+        bn_c_to_p: evt[21] as Int,
+        bn_p_to_c: evt[22] as Int,
+        ft_c_to_p: evt[23] as Int,
+        ft_p_to_c: evt[24] as Int,
+        max_pdu_c_to_p: le16_at(evt, 25),
+        max_pdu_p_to_c: le16_at(evt, 27),
+        iso_interval: le16_at(evt, 29),
+        sub_interval: if v2 then le24_at(evt, 31) else 0,
+        max_sdu_c_to_p: if v2 then le16_at(evt, 34) else 0,
+        max_sdu_p_to_c: if v2 then le16_at(evt, 36) else 0,
+        sdu_interval_c_to_p: if v2 then le24_at(evt, 38) else 0,
+        sdu_interval_p_to_c: if v2 then le24_at(evt, 41) else 0,
+        framing: if v2 then evt[44] as Int else 0 })
+
+// ── LE CIS Request event, Section 7.7.65.26 ─────────────────────────
+//
+//   evt[0] = 0x3E, evt[1] = length, evt[2] = 0x1A, then
+//   ACL_Connection_Handle (2), CIS_Connection_Handle (2), CIG_ID, CIS_ID
+//
+// What a Peripheral's Controller reports when a Central asks for a CIS;
+// the Host answers with LE Accept CIS Request or LE Reject CIS Request on
+// the CIS_Connection_Handle.
+@value
+struct CisRequest
+    acl_connection_handle: Int
+    cis_connection_handle: Int
+    cig_id: Int
+    cis_id: Int
+
+@satisfies("REQ-BLE-HCI-058")
+@tier(embedded)
+fn le_cis_request(evt: [u8]) -> ?CisRequest
+    if not iso_event_shape(evt, LE_SUBEVENT_CIS_REQUEST, 9)
+        return None
+    Some(CisRequest {
+        acl_connection_handle: le16_at(evt, 3) & 0x0FFF,
+        cis_connection_handle: le16_at(evt, 5) & 0x0FFF,
+        cig_id: evt[7] as Int,
+        cis_id: evt[8] as Int })
+
+// ── LE Create BIG Complete event, Section 7.7.65.27 ─────────────────
+//
+//   evt[0] = 0x3E, evt[1] = length, evt[2] = 0x1B, then Status,
+//   BIG_Handle, BIG_Sync_Delay (3), Transport_Latency_BIG (3), PHY, NSE,
+//   BN, PTO, IRC, Max_PDU (2), ISO_Interval (2), Num_BIS and
+//   Connection_Handle[i] (2 each), one for each BIS of the BIG
+struct CreateBigComplete
+    status: Int
+    big_handle: Int
+    big_sync_delay: Int
+    transport_latency_big: Int
+    phy: Int
+    nse: Int
+    bn: Int
+    pto: Int
+    irc: Int
+    max_pdu: Int
+    iso_interval: Int
+    connection_handles: [Int]
+
+// The octets before the Connection_Handle list of the event: the 3-octet
+// header and the 18 octets of parameters up to Num_BIS.
+const CREATE_BIG_COMPLETE_FIXED = 21
+
+@tier(embedded)
+fn iso_handle_list(evt: [u8], at: Int, count: Int) -> [Int]
+    var handles: [Int] = []
+    for i in 0..count
+        list.push(handles, le16_at(evt, at + 2 * i) & 0x0FFF)
+    handles
+
+@satisfies("REQ-BLE-HCI-058")
+@tier(embedded)
+fn le_create_big_complete(evt: [u8]) -> ?CreateBigComplete
+    if list.len(evt) < CREATE_BIG_COMPLETE_FIXED
+        return None
+    let n = evt[20] as Int
+    if not iso_event_shape(evt, LE_SUBEVENT_CREATE_BIG_COMPLETE, CREATE_BIG_COMPLETE_FIXED + 2 * n)
+        return None
+    Some(CreateBigComplete {
+        status: evt[3] as Int,
+        big_handle: evt[4] as Int,
+        big_sync_delay: le24_at(evt, 5),
+        transport_latency_big: le24_at(evt, 8),
+        phy: evt[11] as Int,
+        nse: evt[12] as Int,
+        bn: evt[13] as Int,
+        pto: evt[14] as Int,
+        irc: evt[15] as Int,
+        max_pdu: le16_at(evt, 16),
+        iso_interval: le16_at(evt, 18),
+        connection_handles: iso_handle_list(evt, 21, n) })
+
+// ── LE Terminate BIG Complete event, Section 7.7.65.28 ──────────────
+//
+//   evt[0] = 0x3E, evt[1] = length, evt[2] = 0x1C, then BIG_Handle, Reason
+@value
+struct TerminateBigComplete
+    big_handle: Int
+    reason: Int
+
+@satisfies("REQ-BLE-HCI-058")
+@tier(embedded)
+fn le_terminate_big_complete(evt: [u8]) -> ?TerminateBigComplete
+    if not iso_event_shape(evt, LE_SUBEVENT_TERMINATE_BIG_COMPLETE, 5)
+        return None
+    Some(TerminateBigComplete { big_handle: evt[3] as Int, reason: evt[4] as Int })
+
+// ── LE BIG Sync Established event, Section 7.7.65.29 ────────────────
+//
+//   evt[0] = 0x3E, evt[1] = length, evt[2] = 0x1D, then Status,
+//   BIG_Handle, Transport_Latency_BIG (3), NSE, BN, PTO, IRC, Max_PDU
+//   (2), ISO_Interval (2), Num_BIS and Connection_Handle[i] (2 each),
+//   one for each BIS the Controller synchronized to
+struct BigSyncEstablished
+    status: Int
+    big_handle: Int
+    transport_latency_big: Int
+    nse: Int
+    bn: Int
+    pto: Int
+    irc: Int
+    max_pdu: Int
+    iso_interval: Int
+    connection_handles: [Int]
+
+// The 3-octet header and the 14 octets of parameters up to Num_BIS.
+const BIG_SYNC_ESTABLISHED_FIXED = 17
+
+@satisfies("REQ-BLE-HCI-058")
+@tier(embedded)
+fn le_big_sync_established(evt: [u8]) -> ?BigSyncEstablished
+    if list.len(evt) < BIG_SYNC_ESTABLISHED_FIXED
+        return None
+    let n = evt[16] as Int
+    if not iso_event_shape(evt, LE_SUBEVENT_BIG_SYNC_ESTABLISHED, BIG_SYNC_ESTABLISHED_FIXED + 2 * n)
+        return None
+    Some(BigSyncEstablished {
+        status: evt[3] as Int,
+        big_handle: evt[4] as Int,
+        transport_latency_big: le24_at(evt, 5),
+        nse: evt[8] as Int,
+        bn: evt[9] as Int,
+        pto: evt[10] as Int,
+        irc: evt[11] as Int,
+        max_pdu: le16_at(evt, 12),
+        iso_interval: le16_at(evt, 14),
+        connection_handles: iso_handle_list(evt, 17, n) })
+
+// ── LE BIG Sync Lost event, Section 7.7.65.30 ───────────────────────
+//
+//   evt[0] = 0x3E, evt[1] = length, evt[2] = 0x1E, then BIG_Handle, Reason
+@value
+struct BigSyncLost
+    big_handle: Int
+    reason: Int
+
+@satisfies("REQ-BLE-HCI-058")
+@tier(embedded)
+fn le_big_sync_lost(evt: [u8]) -> ?BigSyncLost
+    if not iso_event_shape(evt, LE_SUBEVENT_BIG_SYNC_LOST, 5)
+        return None
+    Some(BigSyncLost { big_handle: evt[3] as Int, reason: evt[4] as Int })
+
+// ── LE BIGInfo Advertising Report event, Section 7.7.65.34 ──────────
+//
+//   evt[0] = 0x3E, evt[1] = length, evt[2] = 0x22, then Sync_Handle (2),
+//   Num_BIS, NSE, ISO_Interval (2), BN, PTO, IRC, Max_PDU (2),
+//   SDU_Interval (3), Max_SDU (2), PHY, Framing and Encryption
+//
+// What a Controller reports for a periodic advertising train that carries
+// a BIGInfo, so that the Host can decide to synchronize to the BIG with
+// LE BIG Create Sync.
+@value
+struct BigInfoAdvertisingReport
+    sync_handle: Int
+    num_bis: Int
+    nse: Int
+    iso_interval: Int
+    bn: Int
+    pto: Int
+    irc: Int
+    max_pdu: Int
+    sdu_interval: Int
+    max_sdu: Int
+    phy: Int
+    framing: Int
+    encryption: Bool
+
+@satisfies("REQ-BLE-HCI-058")
+@tier(embedded)
+fn le_big_info_advertising_report(evt: [u8]) -> ?BigInfoAdvertisingReport
+    if not iso_event_shape(evt, LE_SUBEVENT_BIG_INFO_ADVERTISING_REPORT, 22)
+        return None
+    Some(BigInfoAdvertisingReport {
+        sync_handle: le16_at(evt, 3) & 0x0FFF,
+        num_bis: evt[5] as Int,
+        nse: evt[6] as Int,
+        iso_interval: le16_at(evt, 7),
+        bn: evt[9] as Int,
+        pto: evt[10] as Int,
+        irc: evt[11] as Int,
+        max_pdu: le16_at(evt, 12),
+        sdu_interval: le24_at(evt, 14),
+        max_sdu: le16_at(evt, 17),
+        phy: evt[19] as Int,
+        framing: evt[20] as Int,
+        encryption: evt[21] as Int != 0 })
+
+// ── HCI ISO Data packets, [Vol 4] Part E, Section 5.4.5 ─────────────
+//
+// The first four octets of the packet are the header: Connection_Handle
+// (12 bits), PB_Flag (2 bits), TS_Flag (1 bit), one reserved bit, and
+// Data_Total_Length (14 bits, then two reserved bits).  The data that
+// follows is the ISO_Data_Load.  When PB_Flag is 0b00 (first fragment) or
+// 0b10 (complete SDU), it starts with the optional Time_Stamp (4 octets,
+// when TS_Flag is set), then Packet_Sequence_Number (2),
+// ISO_SDU_Length (12 bits), two reserved bits and Packet_Status_Flag (2
+// bits, 2 octets together), and then the SDU or its first fragment.  When
+// PB_Flag is 0b01 (intermediate) or 0b11 (last fragment) the data is the
+// fragment and nothing else, and TS_Flag is clear.
+
+const ISO_PB_FIRST_FRAGMENT = 0x00
+
+const ISO_PB_INTERMEDIATE_FRAGMENT = 0x01
+
+const ISO_PB_COMPLETE_SDU = 0x02
+
+const ISO_PB_LAST_FRAGMENT = 0x03
+
+// Packet_Status_Flag of a packet the Controller sends: valid data; data
+// with possible errors; lost data, which comes as a complete SDU of no
+// data and an ISO_SDU_Length of zero.  The Host sends 0b00.
+const ISO_PSF_VALID = 0x00
+
+const ISO_PSF_POSSIBLY_INVALID = 0x01
+
+const ISO_PSF_LOST = 0x02
+
+const ISO_HEADER_LEN = 4
+
+// The SDU header after the optional Time_Stamp: Packet_Sequence_Number and
+// the word of ISO_SDU_Length and Packet_Status_Flag, 4 octets.
+const ISO_SDU_HEADER_LEN = 4
+
+const ISO_TIME_STAMP_LEN = 4
+
+// The ranges of the header fields.
+const ISO_DATA_TOTAL_LENGTH_MAX = 0x3FFF
+
+const ISO_SDU_LENGTH_MAX = 0x0FFF
+
+// One HCI ISO Data packet.  `has_sdu_header` is whether the packet is a
+// first fragment or a complete SDU, the two forms that carry the SDU
+// header; the fields from `has_time_stamp` to `packet_status` are
+// meaningful only when it is set and are 0 or false otherwise.  `data` is
+// the SDU, or the fragment of it.
+struct IsoDataPacket
+    connection_handle: Int
+    pb_flag: Int
+    has_sdu_header: Bool
+    has_time_stamp: Bool
+    time_stamp: Int
+    packet_sequence_number: Int
+    iso_sdu_length: Int
+    packet_status: Int
+    data: [u8]
+
+// Whether the PB_Flag value is one of the two that carry the SDU header.
+@tier(embedded)
+@no_alloc
+fn iso_pb_has_sdu_header(pb_flag: Int) -> Bool
+    pb_flag == ISO_PB_FIRST_FRAGMENT or pb_flag == ISO_PB_COMPLETE_SDU
+
+// The HCI ISO Data packet `pkt`, given without its HCI packet indicator,
+// or None when it is shorter than its header, Data_Total_Length
+// disagrees with the octets that follow, a packet with the SDU header
+// holds fewer octets than the header needs, or a fragment without it has
+// TS_Flag set.
+@satisfies("REQ-BLE-ISO-001")
+@tier(embedded)
+fn iso_data_packet(pkt: [u8]) -> ?IsoDataPacket
+    let n = list.len(pkt)
+    if n < ISO_HEADER_LEN
+        return None
+    let total = le16_at(pkt, 2) & ISO_DATA_TOTAL_LENGTH_MAX
+    if n != ISO_HEADER_LEN + total
+        return None
+    let pb = ((pkt[1] as Int) >>> 4) & 0x03
+    let ts = (((pkt[1] as Int) >>> 6) & 0x01) != 0
+    let handle = le16_at(pkt, 0) & 0x0FFF
+    if not iso_pb_has_sdu_header(pb)
+        if ts
+            return None
+        return Some(IsoDataPacket {
+            connection_handle: handle, pb_flag: pb, has_sdu_header: false, has_time_stamp: false,
+            time_stamp: 0, packet_sequence_number: 0, iso_sdu_length: 0, packet_status: 0,
+            data: pkt[ISO_HEADER_LEN:n] })
+    let load = ISO_HEADER_LEN + (if ts then ISO_TIME_STAMP_LEN else 0)
+    if n < load + ISO_SDU_HEADER_LEN
+        return None
+    let time_stamp = if ts then le32_at(pkt, ISO_HEADER_LEN) else 0
+    let sdu_word = le16_at(pkt, load + 2)
+    Some(IsoDataPacket {
+        connection_handle: handle, pb_flag: pb, has_sdu_header: true, has_time_stamp: ts,
+        time_stamp: time_stamp,
+        packet_sequence_number: le16_at(pkt, load),
+        iso_sdu_length: sdu_word & ISO_SDU_LENGTH_MAX,
+        packet_status: (sdu_word >>> 14) & 0x03,
+        data: pkt[load + ISO_SDU_HEADER_LEN:n] })
+
+// The HCI ISO Data packet for `p`, without its HCI packet indicator, or
+// None when a field does not fit its width: a Connection_Handle above
+// 0x0EFF, a PB_Flag or Packet_Status_Flag above 3, an ISO_SDU_Length above
+// 0x0FFF, a Packet_Sequence_Number above 16 bits, a Time_Stamp above 32
+// bits, a Data_Total_Length above 0x3FFF, or a fragment without the SDU
+// header that has a Time_Stamp.
+@satisfies("REQ-BLE-ISO-001")
+@tier(embedded)
+fn build_iso_data_packet(p: IsoDataPacket) -> ?[u8]
+    if p.connection_handle < 0 or p.connection_handle > 0x0EFF or p.pb_flag < 0 or p.pb_flag > 3
+        return None
+    let has_header = iso_pb_has_sdu_header(p.pb_flag)
+    if not has_header and p.has_time_stamp
+        return None
+    var load: [u8] = []
+    if has_header
+        if p.iso_sdu_length < 0 or p.iso_sdu_length > ISO_SDU_LENGTH_MAX or p.packet_status < 0 or p.packet_status > 3
+            return None
+        if p.packet_sequence_number < 0 or p.packet_sequence_number > 0xFFFF
+            return None
+        if p.has_time_stamp and (p.time_stamp < 0 or p.time_stamp > 0xFFFFFFFF)
+            return None
+        if p.has_time_stamp
+            list.append(load, hci_commands.le32_octets(p.time_stamp))
+        list.append(load, le16_bytes(p.packet_sequence_number))
+        list.append(load, le16_bytes(p.iso_sdu_length | (p.packet_status << 14)))
+    list.append(load, p.data)
+    let total = list.len(load)
+    if total > ISO_DATA_TOTAL_LENGTH_MAX
+        return None
+    let flags = (p.connection_handle >>> 8) | (p.pb_flag << 4) | ((if p.has_time_stamp then 1 else 0) << 6)
+    var out: [u8] = [(p.connection_handle & 0xFF) as u8, flags as u8, (total & 0xFF) as u8, ((total >>> 8) & 0x3F) as u8]
+    list.append(out, load)
+    Some(out)
+
+// The same packet with its HCI packet indicator, ready for the transport.
+@satisfies("REQ-BLE-ISO-001")
+@tier(embedded)
+fn build_h4_iso(p: IsoDataPacket) -> ?[u8]
+    match build_iso_data_packet(p)
+        None      => None
+        Some(pkt) => Some(hci_h4.frame_h4(hci_h4.PKT_ISO, pkt))
+
+// ── Tests ────────────────────────────────────────────────────────────
+
+@test
+fn test_le16_bytes_low_high_order()
+    let b = le16_bytes(0x1234)
+    test.assert_eq(list.len(b), 2)
+    test.assert_eq(b[0] as Int, 0x34)
+    test.assert_eq(b[1] as Int, 0x12)
+
+@test
+fn test_le16_bytes_zero_and_ff()
+    let b0 = le16_bytes(0x0000)
+    test.assert_eq(b0[0] as Int, 0x00)
+    test.assert_eq(b0[1] as Int, 0x00)
+
+    let bff = le16_bytes(0xFFFF)
+    test.assert_eq(bff[0] as Int, 0xFF)
+    test.assert_eq(bff[1] as Int, 0xFF)
+
+@test
+@satisfies("REQ-BLE-HCI-001")
+fn test_build_command_no_params()
+    // HCI_Reset: opcode=0x0C03, no params → [03 0C 00].
+    let c = build_command(hci_commands.opcode_hci_reset(), [])
+    test.assert_eq(list.len(c), 3)
+    test.assert_eq(c[0] as Int, 0x03)
+    test.assert_eq(c[1] as Int, 0x0C)
+    test.assert_eq(c[2] as Int, 0x00)
+
+@test
+@satisfies("REQ-BLE-HCI-001")
+fn test_build_command_with_params()
+    // LE_Set_Advertising_Enable with enable=true: opcode=0x200A,
+    // params=[0x01] → [0A 20 01 01].
+    let c = build_command(hci_commands.opcode_le_set_advertising_enable(), [0x01])
+    test.assert_eq(list.len(c), 4)
+    test.assert_eq(c[0] as Int, 0x0A)
+    test.assert_eq(c[1] as Int, 0x20)
+    test.assert_eq(c[2] as Int, 0x01)   // param_len
+    test.assert_eq(c[3] as Int, 0x01)   // enable byte
+
+@test
+@satisfies("REQ-BLE-H4-001")
+fn test_build_h4_command_prepends_type_byte()
+    // H4-framed HCI_Reset: [01 03 0C 00].
+    let w = build_h4_command(hci_commands.opcode_hci_reset(), [])
+    test.assert_eq(list.len(w), 4)
+    test.assert_eq(w[0] as Int, 0x01)   // H4 Command type byte
+    test.assert_eq(w[1] as Int, 0x03)
+    test.assert_eq(w[2] as Int, 0x0C)
+    test.assert_eq(w[3] as Int, 0x00)
+
+@test
+@satisfies("REQ-BLE-HCI-004")
+fn test_cmd_hci_reset_wire_bytes()
+    let w = cmd_hci_reset()
+    test.assert_eq(list.len(w), 4)
+    test.assert_eq(w[0] as Int, 0x01)
+    test.assert_eq(w[1] as Int, 0x03)
+    test.assert_eq(w[2] as Int, 0x0C)
+    test.assert_eq(w[3] as Int, 0x00)
+
+@test
+@satisfies("REQ-BLE-HCI-005")
+fn test_cmd_read_bd_addr_wire_bytes()
+    let w = cmd_read_bd_addr()
+    // Opcode 0x1009: 09 10.  Wire: 01 09 10 00.
+    test.assert_eq(list.len(w), 4)
+    test.assert_eq(w[0] as Int, 0x01)
+    test.assert_eq(w[1] as Int, 0x09)
+    test.assert_eq(w[2] as Int, 0x10)
+    test.assert_eq(w[3] as Int, 0x00)
+
+@test
+@satisfies("REQ-BLE-HCI-018")
+fn test_cmd_le_set_advertising_enable_true()
+    let w = cmd_le_set_advertising_enable(true)
+    // Opcode 0x200A: 0A 20.  Wire: 01 0A 20 01 01.
+    test.assert_eq(list.len(w), 5)
+    test.assert_eq(w[0] as Int, 0x01)
+    test.assert_eq(w[1] as Int, 0x0A)
+    test.assert_eq(w[2] as Int, 0x20)
+    test.assert_eq(w[3] as Int, 0x01)
+    test.assert_eq(w[4] as Int, 0x01)
+
+@test
+@satisfies("REQ-BLE-HCI-018")
+fn test_cmd_le_set_advertising_enable_false_has_zero_byte()
+    let w = cmd_le_set_advertising_enable(false)
+    test.assert_eq(list.len(w), 5)
+    test.assert_eq(w[4] as Int, 0x00)   // disable byte
+
+@test
+@satisfies("REQ-BLE-HCI-013")
+fn test_cmd_le_set_random_address_six_bytes()
+    let a: [u8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0xC6]
+    let w = cmd_le_set_random_address(a)
+    // Opcode 0x2005: 05 20.  Wire: 01 05 20 06 11 22 33 44 55 C6.
+    test.assert_eq(list.len(w), 10)
+    test.assert_eq(w[0] as Int, 0x01)
+    test.assert_eq(w[3] as Int, 0x06)   // param_len = 6
+
+@test
+@satisfies("REQ-BLE-HCI-002")
+fn test_event_code_and_param_len()
+    // Command_Complete event body (no H4 prefix): 0E 04 01 03 0C 00.
+    let e: [u8] = [0x0E, 0x04, 0x01, 0x03, 0x0C, 0x00]
+    test.assert_eq(event_code(e), 0x0E)
+    test.assert_eq(event_param_len(e), 0x04)
+
+@test
+fn test_event_code_empty_returns_minus_one()
+    test.assert_eq(event_code([]), -1)
+
+@test
+fn test_event_param_len_too_short()
+    let e: [u8] = [0x0E]   // only code, no len
+    test.assert_eq(event_param_len(e), -1)
+
+@test
+@satisfies("REQ-BLE-HCI-003")
+fn test_is_command_complete_positive()
+    let e: [u8] = [0x0E, 0x04, 0x01, 0x03, 0x0C, 0x00]
+    test.assert_eq(is_command_complete(e), true)
+
+@test
+@satisfies("REQ-BLE-HCI-003")
+fn test_is_command_complete_negative()
+    // Disconnection_Complete event (code 0x05).
+    let e: [u8] = [0x05, 0x04, 0x00, 0x01, 0x00, 0x13]
+    test.assert_eq(is_command_complete(e), false)
+
+@test
+@satisfies("REQ-BLE-HCI-003")
+fn test_command_complete_opcode_extraction()
+    // Command_Complete for HCI_Reset (opcode 0x0C03): 0E 04 01 03 0C 00.
+    let e: [u8] = [0x0E, 0x04, 0x01, 0x03, 0x0C, 0x00]
+    test.assert_eq(command_complete_opcode(e), 0x0C03)
+
+    // Command_Complete for LE_Set_Advertising_Enable (opcode 0x200A).
+    let e2: [u8] = [0x0E, 0x04, 0x01, 0x0A, 0x20, 0x00]
+    test.assert_eq(command_complete_opcode(e2), 0x200A)
+
+@test
+fn test_command_complete_opcode_too_short_buffer()
+    // 4 bytes is under the 5-byte minimum for extracting opcode.
+    let e: [u8] = [0x0E, 0x04, 0x01, 0x03]
+    test.assert_eq(command_complete_opcode(e), -1)
+
+@test
+@satisfies("REQ-BLE-HCI-003")
+fn test_command_complete_status()
+    // LE_Set_Advertising_Enable refused with Command Disallowed (0x0C).
+    let e: [u8] = [0x0E, 0x04, 0x01, 0x0A, 0x20, 0x0C]
+    test.assert_eq(command_complete_status(e), 0x0C)
+    let short: [u8] = [0x0E, 0x03, 0x01, 0x00, 0x00]
+    test.assert_eq(command_complete_status(short), -1)
+
+@test
+fn test_command_status_fields()
+    // Command_Status for LE_Create_Connection (0x200D), status 0.
+    let e: [u8] = [0x0F, 0x04, 0x00, 0x01, 0x0D, 0x20]
+    test.assert_eq(is_command_status(e), true)
+    test.assert_eq(command_status_status(e), 0x00)
+    test.assert_eq(command_status_opcode(e), 0x200D)
+    test.assert_eq(command_status_opcode([0x0F, 0x04, 0x00]), -1)
+
+@test
+@satisfies("REQ-BLE-HCI-003")
+fn test_answered_opcode_and_status()
+    let cc: [u8] = [0x0E, 0x04, 0x01, 0x03, 0x0C, 0x00]
+    let cs: [u8] = [0x0F, 0x04, 0x12, 0x01, 0x0D, 0x20]
+    let meta: [u8] = [0x3E, 0x03, 0x02, 0x01, 0x00]
+    test.assert_eq(answered_opcode(cc), 0x0C03)
+    test.assert_eq(answered_status(cc), 0x00)
+    test.assert_eq(answered_opcode(cs), 0x200D)
+    test.assert_eq(answered_status(cs), 0x12)
+    test.assert_eq(answered_opcode(meta), -1)
+    test.assert_eq(answered_status(meta), -1)
+
+@test
+fn test_le_meta_subevent()
+    let meta: [u8] = [0x3E, 0x03, 0x02, 0x01, 0x00]
+    test.assert_eq(le_meta_subevent(meta), 0x02)
+    let cc: [u8] = [0x0E, 0x04, 0x01, 0x03, 0x0C, 0x00]
+    test.assert_eq(le_meta_subevent(cc), -1)
+
+// An LE Advertising Report event with one ADV_IND report from random
+// address C6:55:44:33:22:11, data Flags 02 01 06, RSSI -60 (0xC4).
+@tier(app)
+fn one_report_event() -> [u8]
+    [0x3E, 0x0F, 0x02, 0x01,
+     0x00, 0x01, 0x11, 0x22, 0x33, 0x44, 0x55, 0xC6,
+     0x03, 0x02, 0x01, 0x06,
+     0xC4]
+
+@test
+fn test_le_advertising_report_one_report()
+    match le_advertising_reports(one_report_event())
+        None    => test.fail("one report decodes")
+        Some(r) =>
+            test.assert_eq(list.len(r), 1)
+            test.assert_eq(r[0].event_type, ADV_REPORT_ADV_IND)
+            test.assert_eq(r[0].address_type, 0x01)
+            test.assert_eq(list.len(r[0].address), 6)
+            test.assert_eq(r[0].address[0] as Int, 0x11)
+            test.assert_eq(r[0].address[5] as Int, 0xC6)
+            test.assert_eq(list.len(r[0].data), 3)
+            test.assert_eq(r[0].data[2] as Int, 0x06)
+            test.assert_eq(r[0].rssi, 0xC4)
+
+@test
+fn test_le_advertising_report_two_reports_element_by_element()
+    // A SCAN_RSP with no data and RSSI not available, then an
+    // ADV_NONCONN_IND from public address 66:55:44:33:22:11 with two
+    // octets of data, laid out report by report.
+    let evt: [u8] = [0x3E, 0x18, 0x02, 0x02,
+                     0x04, 0x01, 0x11, 0x22, 0x33, 0x44, 0x55, 0xC6, 0x00, 0x7F,
+                     0x03, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x02, 0xAA, 0xBB, 0xD0]
+    match le_advertising_reports(evt)
+        None    => test.fail("two reports decode")
+        Some(r) =>
+            test.assert_eq(list.len(r), 2)
+            test.assert_eq(r[0].event_type, ADV_REPORT_SCAN_RSP)
+            test.assert_eq(list.len(r[0].data), 0)
+            test.assert_eq(r[0].rssi, ADV_REPORT_RSSI_NOT_AVAILABLE)
+            test.assert_eq(r[1].event_type, ADV_REPORT_ADV_NONCONN_IND)
+            test.assert_eq(r[1].address_type, 0x00)
+            test.assert_eq(r[1].address[5] as Int, 0x66)
+            test.assert_eq(r[1].data[0] as Int, 0xAA)
+            test.assert_eq(r[1].data[1] as Int, 0xBB)
+            test.assert_eq(r[1].rssi, 0xD0)
+
+@test
+fn test_le_advertising_report_refusals()
+    // Another subevent, a Command Complete, a length that disagrees,
+    // Num_Reports 0, a Data_Length past the end and one over 31.
+    let conn: [u8] = [0x3E, 0x03, 0x01, 0x00, 0x00]
+    test.assert(le_advertising_reports(conn) == None)
+    let cc: [u8] = [0x0E, 0x04, 0x01, 0x03, 0x0C, 0x00]
+    test.assert(le_advertising_reports(cc) == None)
+    var wrong_total = one_report_event()[:]
+    wrong_total[1] = 0x10
+    test.assert(le_advertising_reports(wrong_total) == None)
+    let none: [u8] = [0x3E, 0x02, 0x02, 0x00]
+    test.assert(le_advertising_reports(none) == None)
+    var overrun = one_report_event()[:]
+    overrun[12] = 0x05
+    test.assert(le_advertising_reports(overrun) == None)
+    var too_long: [u8] = [0x3E, 0x2D, 0x02, 0x01, 0x00, 0x01, 0x11, 0x22, 0x33, 0x44, 0x55, 0xC6, 0x20]
+    for _ in 0..32
+        list.push(too_long, 0x00)
+    list.push(too_long, 0xC4)
+    test.assert(le_advertising_reports(too_long) == None)
+
+// An LE Connection Complete event: Status 0, Connection_Handle 0x0040,
+// Peripheral, the public address 66:55:44:33:22:11, Connection_Interval
+// 0x0028, Peripheral_Latency 0, Supervision_Timeout 0x01F4.
+@tier(app)
+fn connection_complete_event() -> [u8]
+    [0x3E, 0x13, 0x01, 0x00, 0x40, 0x00, 0x01, 0x00,
+     0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+     0x28, 0x00, 0x00, 0x00, 0xF4, 0x01, 0x00]
+
+@test
+fn test_le_connection_complete_fields()
+    match le_connection_complete(connection_complete_event())
+        None    => test.fail("the event decodes")
+        Some(c) =>
+            test.assert_eq(c.status, 0)
+            test.assert_eq(c.connection_handle, 0x0040)
+            test.assert_eq(c.role, CONNECTION_ROLE_PERIPHERAL)
+            test.assert_eq(c.peer_address_type, 0x00)
+            test.assert_eq(c.peer_address[0] as Int, 0x11)
+            test.assert_eq(c.peer_address[5] as Int, 0x66)
+            test.assert_eq(c.connection_interval, 0x0028)
+            test.assert_eq(c.peripheral_latency, 0)
+            test.assert_eq(c.supervision_timeout, 0x01F4)
+
+@test
+fn test_le_enhanced_connection_complete_skips_the_private_addresses()
+    var evt: [u8] = [0x3E, 0x1F, 0x0A, 0x00, 0x41, 0x00, 0x01, 0x01,
+                     0x11, 0x22, 0x33, 0x44, 0x55, 0xC6]
+    for _ in 0..12
+        list.push(evt, 0xEE)
+    list.append(evt, [0x18, 0x00, 0x02, 0x00, 0x48, 0x00, 0x00])
+    match le_connection_complete(evt)
+        None    => test.fail("the enhanced event decodes")
+        Some(c) =>
+            test.assert_eq(c.connection_handle, 0x0041)
+            test.assert_eq(c.peer_address_type, 0x01)
+            test.assert_eq(c.peer_address[5] as Int, 0xC6)
+            test.assert_eq(c.connection_interval, 0x0018)
+            test.assert_eq(c.peripheral_latency, 2)
+            test.assert_eq(c.supervision_timeout, 0x0048)
+
+@test
+fn test_le_connection_complete_refusals()
+    // An advertising report, a length that disagrees, a short event.
+    test.assert(le_connection_complete(one_report_event()) == None)
+    var wrong_total = connection_complete_event()[:]
+    wrong_total[1] = 0x12
+    test.assert(le_connection_complete(wrong_total) == None)
+    test.assert(le_connection_complete(connection_complete_event()[0:20]) == None)
+
+@test
+fn test_disconnection_complete_fields()
+    // Status 0, Connection_Handle 0x0040, Reason 0x16 Connection
+    // Terminated By Local Host.
+    let evt: [u8] = [0x05, 0x04, 0x00, 0x40, 0x00, 0x16]
+    match disconnection_complete(evt)
+        None    => test.fail("the event decodes")
+        Some(d) =>
+            test.assert_eq(d.status, 0)
+            test.assert_eq(d.connection_handle, 0x0040)
+            test.assert_eq(d.reason, 0x16)
+    test.assert(disconnection_complete(connection_complete_event()) == None)
+    test.assert(disconnection_complete(evt[0:5]) == None)
+
+@test
+fn test_acl_data_packet_fields()
+    // Connection_Handle 0x0040, Packet_Boundary_Flag 0b10, 3 octets.
+    let pkt: [u8] = [0x40, 0x20, 0x03, 0x00, 0xAA, 0xBB, 0xCC]
+    match acl_data_packet(pkt)
+        None    => test.fail("the packet decodes")
+        Some(a) =>
+            test.assert_eq(a.connection_handle, 0x0040)
+            test.assert_eq(a.packet_boundary, ACL_PB_FIRST_FLUSHABLE)
+            test.assert_eq(a.broadcast, 0)
+            test.assert_eq(list.len(a.data), 3)
+            test.assert_eq(a.data[2] as Int, 0xCC)
+    // A Data_Total_Length that disagrees, and a short header.
+    test.assert(acl_data_packet(pkt[0:6]) == None)
+    test.assert(acl_data_packet(pkt[0:3]) == None)
+
+@test
+fn test_build_h4_acl_layout()
+    let pkt = build_h4_acl(0x0A41, ACL_PB_CONTINUING, [0x01, 0x02])
+    let want: [u8] = [0x02, 0x41, 0x1A, 0x02, 0x00, 0x01, 0x02]
+    test.assert_eq(list.len(pkt), list.len(want))
+    for i in 0..list.len(want)
+        test.assert_eq(pkt[i] as Int, want[i] as Int)
+    // The packet decodes back.
+    match acl_data_packet(pkt[1:])
+        None    => test.fail("round trip")
+        Some(a) =>
+            test.assert_eq(a.connection_handle, 0x0A41)
+            test.assert_eq(a.packet_boundary, ACL_PB_CONTINUING)
+
+@test
+fn test_number_of_completed_packets_pairs()
+    // Two handles, element by element.
+    let evt: [u8] = [0x13, 0x09, 0x02, 0x40, 0x00, 0x02, 0x00, 0x41, 0x00, 0x01, 0x00]
+    match number_of_completed_packets(evt)
+        None        => test.fail("the event decodes")
+        Some(pairs) =>
+            test.assert_eq(list.len(pairs), 2)
+            test.assert_eq(pairs[0].connection_handle, 0x0040)
+            test.assert_eq(pairs[0].count, 2)
+            test.assert_eq(pairs[1].connection_handle, 0x0041)
+            test.assert_eq(pairs[1].count, 1)
+    test.assert(number_of_completed_packets(evt[0:10]) == None)
+    test.assert(number_of_completed_packets(connection_complete_event()) == None)
+
+@test
+fn test_le_connection_update_complete_fields()
+    let evt: [u8] = [0x3E, 0x0A, 0x03, 0x00, 0x40, 0x00, 0x32, 0x00, 0x01, 0x00, 0xF4, 0x01]
+    match le_connection_update_complete(evt)
+        None    => test.fail("the event decodes")
+        Some(u) =>
+            test.assert_eq(u.status, 0)
+            test.assert_eq(u.connection_handle, 0x0040)
+            test.assert_eq(u.connection_interval, 0x0032)
+            test.assert_eq(u.peripheral_latency, 1)
+            test.assert_eq(u.supervision_timeout, 0x01F4)
+    test.assert(le_connection_update_complete(evt[0:11]) == None)
+    test.assert(le_connection_update_complete(connection_complete_event()) == None)
+
+@test
+fn test_le_remote_connection_parameter_request_fields()
+    let evt: [u8] = [0x3E, 0x0B, 0x06, 0x40, 0x00, 0x32, 0x00, 0x46, 0x00, 0x01, 0x00, 0xF4, 0x01]
+    match le_remote_connection_parameter_request(evt)
+        None    => test.fail("the event decodes")
+        Some(r) =>
+            test.assert_eq(r.connection_handle, 0x0040)
+            test.assert_eq(r.interval_min, 0x0032)
+            test.assert_eq(r.interval_max, 0x0046)
+            test.assert_eq(r.max_latency, 1)
+            test.assert_eq(r.timeout, 0x01F4)
+    test.assert(le_remote_connection_parameter_request(evt[0:12]) == None)
+
+@test
+fn test_le_long_term_key_request_and_encryption_events()
+    let evt: [u8] = [0x3E, 0x0D, 0x05, 0x40, 0x00, 1, 2, 3, 4, 5, 6, 7, 8, 0x34, 0x12]
+    match le_long_term_key_request(evt)
+        None    => test.fail("the event decodes")
+        Some(r) =>
+            test.assert_eq(r.connection_handle, 0x0040)
+            test.assert_eq(r.random_number[7] as Int, 8)
+            test.assert_eq(r.encrypted_diversifier, 0x1234)
+    test.assert(is_encryption_event(evt))
+    test.assert(is_encryption_event([0x08, 0x04, 0x00, 0x40, 0x00, 0x01]))
+    test.assert(is_encryption_event([0x30, 0x03, 0x00, 0x40, 0x00]))
+    test.assert(not is_encryption_event(connection_complete_event()))
+    match encryption_change([0x08, 0x04, 0x00, 0x40, 0x00, 0x01])
+        None    => test.fail("Encryption Change decodes")
+        Some(e) =>
+            test.assert_eq(e.connection_handle, 0x0040)
+            test.assert(e.enabled)
+    match encryption_change([0x08, 0x04, 0x06, 0x40, 0x00, 0x01])
+        None    => test.fail("a failed Encryption Change decodes")
+        Some(e) =>
+            test.assert_eq(e.status, 0x06)
+            test.assert(not e.enabled)
+    match encryption_change([0x30, 0x03, 0x00, 0x41, 0x00])
+        None    => test.fail("Encryption Key Refresh Complete decodes")
+        Some(e) =>
+            test.assert_eq(e.connection_handle, 0x0041)
+            test.assert(e.enabled)
+    test.assert(encryption_change(evt) == None)
+    test.assert(encryption_change([0x08, 0x03, 0x00, 0x40, 0x00]) == None)
+
+@test
+fn test_le_buffer_size_return_parameters()
+    match le_buffer_size([0xFB, 0x00, 0x03])
+        None    => test.fail("the parameters decode")
+        Some(b) =>
+            test.assert_eq(b.acl_data_packet_length, 251)
+            test.assert_eq(b.total_acl_data_packets, 3)
+    test.assert(le_buffer_size([0x1B]) == None)
+
+// ── Periodic advertising, [Vol 4] Part E, Section 7.7.65.14-16 and
+//    Section 7.7.65.24 ───────────────────────────────────────────────
+//
+// Periodic advertising has four LE Meta subevents of its own.  Each of
+// them is reported without its HCI packet indicator and without the LE
+// Meta header, so `le_meta_subevent` on the event packet is how a
+// caller tells them apart, and the parsers below take the packet the
+// event code has been stripped from, as `le_connection_complete` does.
+
+const LE_SUBEVENT_PERIODIC_ADVERTISING_SYNC_ESTABLISHED = 0x0E
+
+const LE_SUBEVENT_PERIODIC_ADVERTISING_REPORT = 0x0F
+
+const LE_SUBEVENT_PERIODIC_ADVERTISING_SYNC_LOST = 0x10
+
+const LE_SUBEVENT_PERIODIC_ADVERTISING_SYNC_TRANSFER_RECEIVED = 0x18
+
+// Data_Status of the LE Periodic Advertising Report event ([Vol 4] Part
+// E, Section 7.7.65.15): Complete, or one of the two incomplete
+// states, which only the profiles that receive fragmented periodic
+// advertising data act on.
+const PERIODIC_DATA_COMPLETE = 0x00
+
+const PERIODIC_DATA_INCOMPLETE_MORE = 0x01
+
+const PERIODIC_DATA_INCOMPLETE_TRUNCATED = 0x02
+
+// ── LE Periodic Advertising Sync Established event, Section 7.7.65.14 ─
+//
+//   evt[0] = 0x3E, evt[1] = length, evt[2] = 0x0E, then Status,
+//   Sync_Handle (2, 12 bits), Advertising_SID, Advertiser_Address_Type,
+//   Advertiser_Address (6), Advertiser_PHY,
+//   Periodic_Advertising_Interval (2), Advertiser_Clock_Accuracy
+
+struct PeriodicSyncEstablished
+    status: Int
+    sync_handle: Int
+    advertising_sid: Int
+    advertiser_address_type: Int
+    advertiser_address: [u8]
+    advertiser_phy: Int
+    periodic_interval: Int
+    advertiser_clock_accuracy: Int
+
+@tier(embedded)
+fn le_periodic_sync_established(evt: [u8]) -> ?PeriodicSyncEstablished
+    if event_code(evt) != hci_frame.EVT_LE_META_EVENT
+        return None
+    if list.len(evt) < 18 or le_meta_subevent(evt) != LE_SUBEVENT_PERIODIC_ADVERTISING_SYNC_ESTABLISHED
+        return None
+    Some(PeriodicSyncEstablished {
+        status: evt[3] as Int,
+        sync_handle: le16_at(evt, 4) & 0x0FFF,
+        advertising_sid: evt[6] as Int,
+        advertiser_address_type: evt[7] as Int,
+        advertiser_address: evt[8:14],
+        advertiser_phy: evt[14] as Int,
+        periodic_interval: le16_at(evt, 15),
+        advertiser_clock_accuracy: evt[17] as Int })
+
+// ── LE Periodic Advertising Sync Lost event, Section 7.7.65.16 ──────
+//
+//   evt[0] = 0x3E, evt[1] = length, evt[2] = 0x10, then Sync_Handle (2)
+
+struct PeriodicSyncLost
+    sync_handle: Int
+
+@tier(embedded)
+fn le_periodic_sync_lost(evt: [u8]) -> ?PeriodicSyncLost
+    if event_code(evt) != hci_frame.EVT_LE_META_EVENT
+        return None
+    if list.len(evt) < 5 or le_meta_subevent(evt) != LE_SUBEVENT_PERIODIC_ADVERTISING_SYNC_LOST
+        return None
+    Some(PeriodicSyncLost { sync_handle: le16_at(evt, 3) & 0x0FFF })
+
+// ── LE Periodic Advertising Report event, Section 7.7.65.15 ─────────
+//
+//   evt[0] = 0x3E, evt[1] = length, evt[2] = 0x0F, then Sync_Handle (2),
+//   TX_Power, RSSI, CTE_Type, Data_Status, Data_Length, Data
+//
+// The header is 8 octets, and the data follows it.
+
+struct PeriodicAdvertisingReport
+    sync_handle: Int
+    tx_power: Int
+    rssi: Int
+    cte_type: Int
+    data_status: Int
+    data: [u8]
+
+const PERIODIC_REPORT_HEADER = 10
+
+@tier(embedded)
+fn le_periodic_advertising_report(evt: [u8]) -> ?PeriodicAdvertisingReport
+    if event_code(evt) != hci_frame.EVT_LE_META_EVENT
+        return None
+    if list.len(evt) < PERIODIC_REPORT_HEADER or le_meta_subevent(evt) != LE_SUBEVENT_PERIODIC_ADVERTISING_REPORT
+        return None
+    let n = evt[9] as Int
+    if PERIODIC_REPORT_HEADER + n > list.len(evt)
+        return None
+    Some(PeriodicAdvertisingReport {
+        sync_handle: le16_at(evt, 3) & 0x0FFF,
+        tx_power: evt[5] as Int,
+        rssi: evt[6] as Int,
+        cte_type: evt[7] as Int,
+        data_status: evt[8] as Int,
+        data: evt[PERIODIC_REPORT_HEADER:PERIODIC_REPORT_HEADER + n] })
+
+// ── LE Periodic Advertising Sync Transfer Received event,
+//    Section 7.7.65.24 ──────────────────────────────────────────────
+//
+//   evt[0] = 0x3E, evt[1] = length, evt[2] = 0x18, then Status,
+//   Connection_Handle (2), Service_Data (2), Sync_Handle (2, 12 bits),
+//   Advertising_SID, Advertiser_Address_Type, Advertiser_Address (6),
+//   Advertiser_PHY, Periodic_Advertising_Interval (2),
+//   Advertiser_Clock_Accuracy
+
+struct PeriodicSyncTransferReceived
+    status: Int
+    connection_handle: Int
+    service_data: Int
+    sync_handle: Int
+    advertising_sid: Int
+    advertiser_address_type: Int
+    advertiser_address: [u8]
+    advertiser_phy: Int
+    periodic_interval: Int
+    advertiser_clock_accuracy: Int
+
+@tier(embedded)
+fn le_periodic_sync_transfer_received(evt: [u8]) -> ?PeriodicSyncTransferReceived
+    if event_code(evt) != hci_frame.EVT_LE_META_EVENT
+        return None
+    if list.len(evt) < 22 or le_meta_subevent(evt) != LE_SUBEVENT_PERIODIC_ADVERTISING_SYNC_TRANSFER_RECEIVED
+        return None
+    Some(PeriodicSyncTransferReceived {
+        status: evt[3] as Int,
+        connection_handle: le16_at(evt, 4) & 0x0FFF,
+        service_data: le16_at(evt, 6),
+        sync_handle: le16_at(evt, 8) & 0x0FFF,
+        advertising_sid: evt[10] as Int,
+        advertiser_address_type: evt[11] as Int,
+        advertiser_address: evt[12:18],
+        advertiser_phy: evt[18] as Int,
+        periodic_interval: le16_at(evt, 19),
+        advertiser_clock_accuracy: evt[21] as Int })
+
+// ── LE Periodic Advertising Subevent Data Request, Section 7.7.65.36 ─
+//
+//   evt[0] = 0x3E, evt[1] = length (4), evt[2] = 0x27, then
+//   Advertising_Handle, Subevent_Start, Subevent_Data_Count
+//
+// The Controller asks the advertiser for the data of the subevents of an
+// upcoming periodic advertising event: `subevent_start` is the first one
+// and `subevent_data_count` how many follow it, wrapping past the last
+// subevent of the train ([Vol 4] Part E, Section 7.8.125).  A train with
+// responses carries no data a Lower Tester can read until the Host
+// answers one of these.
+
+const LE_SUBEVENT_PERIODIC_ADVERTISING_SUBEVENT_DATA_REQUEST = 0x27
+
+struct PawrSubeventRequest
+    advertising_handle: Int
+    subevent_start: Int
+    subevent_data_count: Int
+
+@tier(embedded)
+fn le_periodic_advertising_subevent_data_request(evt: [u8]) -> ?PawrSubeventRequest
+    if event_code(evt) != hci_frame.EVT_LE_META_EVENT
+        return None
+    if list.len(evt) < 6 or le_meta_subevent(evt) != LE_SUBEVENT_PERIODIC_ADVERTISING_SUBEVENT_DATA_REQUEST
+        return None
+    Some(PawrSubeventRequest {
+        advertising_handle: evt[3] as Int,
+        subevent_start: evt[4] as Int,
+        subevent_data_count: evt[5] as Int })
+
+// ── LE Periodic Advertising Response Report, Section 7.7.65.37 ──────
+//
+//   evt[0] = 0x3E, evt[1] = length, evt[2] = 0x28, then
+//   Advertising_Handle, Subevent, TX_Status, Num_Responses, and for
+//   every response TX_Power, RSSI, CTE_Type, Response_Slot,
+//   Data_Status, Data_Length and the data
+//
+// This is what the synchronized devices answered in the response slots
+// the advertiser asked for.  A response slot's data may arrive in more
+// than one report, in which case every one but the last carries the
+// "incomplete, more data to come" Data_Status.
+
+const LE_SUBEVENT_PERIODIC_ADVERTISING_RESPONSE_REPORT = 0x28
+
+// Tx_Status of the report: 0x00 when the subevent and its response slots
+// went out, 0x01 when the Controller failed to transmit the subevent, so
+// no device could answer ([Vol 4] Part E, Section 7.7.65.37).
+const PAWR_TX_STATUS_SUCCESS = 0x00
+
+const PAWR_TX_STATUS_FAILED = 0x01
+
+struct PawrResponse
+    tx_power: Int
+    rssi: Int
+    cte_type: Int
+    response_slot: Int
+    data_status: Int
+    data: [u8]
+
+struct PawrResponseReport
+    advertising_handle: Int
+    subevent: Int
+    tx_status: Int
+    responses: [PawrResponse]
+
+// The six one-octet header fields that lead one response.
+const PAWR_RESPONSE_HEADER = 6
+
+@tier(embedded)
+fn le_periodic_advertising_response_report(evt: [u8]) -> ?PawrResponseReport
+    if event_code(evt) != hci_frame.EVT_LE_META_EVENT
+        return None
+    if list.len(evt) < 7 or le_meta_subevent(evt) != LE_SUBEVENT_PERIODIC_ADVERTISING_RESPONSE_REPORT
+        return None
+    let n = evt[6] as Int
+    var out: [PawrResponse] = []
+    var at = 7
+    for _ in 0..n
+        if at + PAWR_RESPONSE_HEADER > list.len(evt)
+            return None
+        let length = evt[at + 5] as Int
+        if at + PAWR_RESPONSE_HEADER + length > list.len(evt)
+            return None
+        list.push(out, PawrResponse {
+            tx_power: evt[at] as Int,
+            rssi: evt[at + 1] as Int,
+            cte_type: evt[at + 2] as Int,
+            response_slot: evt[at + 3] as Int,
+            data_status: evt[at + 4] as Int,
+            data: evt[(at + PAWR_RESPONSE_HEADER):(at + PAWR_RESPONSE_HEADER + length)] })
+        at = at + PAWR_RESPONSE_HEADER + length
+    Some(PawrResponseReport {
+        advertising_handle: evt[3] as Int,
+        subevent: evt[4] as Int,
+        tx_status: evt[5] as Int,
+        responses: out })
+
+// ── Periodic advertising tests ──────────────────────────────────────
+
+@test
+fn test_periodic_sync_established_decodes()
+    // Status 0x00, Sync_Handle 0x0005, SID 0x02, a public advertiser
+    // address C0:4E:4F:56:4F:01, LE 1M, 200 units of 1.25 ms, 100 ppm.
+    let evt: [u8] = [0x3E, 0x10, 0x0E, 0x00, 0x05, 0x00, 0x02, 0x00,
+                     0x01, 0x4F, 0x56, 0x4F, 0x4E, 0xC0, 0x01, 0xC8, 0x00, 0x03]
+    match le_periodic_sync_established(evt)
+        None    => test.fail("the Sync Established event decodes")
+        Some(e) =>
+            test.assert_eq(e.status, 0x00)
+            test.assert_eq(e.sync_handle, 0x0005)
+            test.assert_eq(e.advertising_sid, 0x02)
+            test.assert_eq(e.advertiser_phy, 0x01)
+            test.assert_eq(e.periodic_interval, 200)
+            test.assert_eq(e.advertiser_address[0] as Int, 0x01)
+    test.assert(le_periodic_sync_established([0x3E, 0x03, 0x02, 0x01, 0x00, 0x00]) == None)
+
+@test
+fn test_periodic_sync_lost_decodes()
+    let evt: [u8] = [0x3E, 0x03, 0x10, 0x05, 0x00]
+    match le_periodic_sync_lost(evt)
+        None    => test.fail("the Sync Lost event decodes")
+        Some(e) => test.assert_eq(e.sync_handle, 0x0005)
+    // An LE Advertising Report is not one.
+    test.assert(le_periodic_sync_lost([0x3E, 0x03, 0x02, 0x01, 0x00]) == None)
+    test.assert(le_periodic_sync_lost([0x3E, 0x03, 0x10, 0x05, 0x00]) != None)
+
+@test
+fn test_periodic_report_decodes_its_data()
+    // Sync_Handle 0x0005, TX_Power 0x7F (none), RSSI 0xBF, CTE_Type
+    // 0xFF, Data_Status Complete and the three octets of one AD record.
+    let evt: [u8] = [0x3E, 0x0B, 0x0F, 0x05, 0x00, 0x7F, 0xBF, 0xFF,
+                     0x00, 0x03, 0x02, 0x01, 0x06]
+    match le_periodic_advertising_report(evt)
+        None    => test.fail("the Periodic Advertising Report decodes")
+        Some(r) =>
+            test.assert_eq(r.sync_handle, 0x0005)
+            test.assert_eq(r.cte_type, 0xFF)
+            test.assert_eq(r.data_status, PERIODIC_DATA_COMPLETE)
+            test.assert_eq(list.len(r.data), 3)
+            test.assert_eq(r.data[2] as Int, 0x06)
+    // A Data_Length longer than the event carries is not a report.
+    let short: [u8] = [0x3E, 0x0B, 0x0F, 0x05, 0x00, 0x7F, 0xBF, 0xFF, 0x00, 0x09, 0x02, 0x01]
+    test.assert(le_periodic_advertising_report(short) == None)
+    // A report with no data at all is one too.
+    let empty: [u8] = [0x3E, 0x08, 0x0F, 0x05, 0x00, 0x7F, 0xBF, 0xFF, 0x00, 0x00]
+    match le_periodic_advertising_report(empty)
+        None    => test.fail("a report with no data decodes")
+        Some(r) => test.assert_eq(list.len(r.data), 0)
+
+@test
+fn test_periodic_sync_transfer_received_decodes()
+    let evt: [u8] = [0x3E, 0x14, 0x18, 0x00, 0x41, 0x0E, 0x34, 0x12,
+                     0x05, 0x00, 0x02, 0x00,
+                     0x01, 0x4F, 0x56, 0x4F, 0x4E, 0xC0, 0x01, 0xC8, 0x00, 0x03]
+    match le_periodic_sync_transfer_received(evt)
+        None    => test.fail("the Sync Transfer Received event decodes")
+        Some(t) =>
+            test.assert_eq(t.status, 0x00)
+            test.assert_eq(t.connection_handle, 0x0E41)
+            test.assert_eq(t.service_data, 0x1234)
+            test.assert_eq(t.sync_handle, 0x0005)
+            test.assert_eq(t.advertiser_address_type, 0x00)
+            test.assert_eq(t.advertiser_address[0] as Int, 0x01)
+    test.assert(le_periodic_sync_transfer_received([0x3E, 0x03, 0x01, 0x00, 0x00, 0x00]) == None)
+
+@test
+fn test_pawr_subevent_data_request_decodes()
+    // Advertising_Handle 0x00, Subevent_Start 0x07, Subevent_Data_Count
+    // 0x03: the shape the rig's SoftDevice Controller sends, which asks
+    // for three subevents at a time whatever the train's subevent count.
+    let evt: [u8] = [0x3E, 0x04, 0x27, 0x00, 0x07, 0x03]
+    match le_periodic_advertising_subevent_data_request(evt)
+        None    => test.fail("the Subevent Data Request decodes")
+        Some(r) =>
+            test.assert_eq(r.advertising_handle, 0x00)
+            test.assert_eq(r.subevent_start, 0x07)
+            test.assert_eq(r.subevent_data_count, 0x03)
+    // Another LE Meta event is not one, and neither is a request cut
+    // short of its three parameters.
+    test.assert(le_periodic_advertising_subevent_data_request([0x3E, 0x04, 0x0F, 0x00, 0x07, 0x03]) == None)
+    test.assert(le_periodic_advertising_subevent_data_request([0x3E, 0x03, 0x27, 0x00, 0x07]) == None)
+
+@test
+fn test_pawr_response_report_decodes()
+    // Advertising_Handle 0x00, Subevent 0x02, TX_Status Success, two
+    // responses: slot 0 with the three-octet AD record 02 01 06, and slot
+    // 3 with no data at all.
+    let evt: [u8] = [0x3E, 0x11, 0x28, 0x00, 0x02, 0x00, 0x02,
+                     0x7F, 0xBF, 0xFF, 0x00, 0x00, 0x03, 0x02, 0x01, 0x06,
+                     0x7F, 0xBE, 0xFF, 0x03, 0x00, 0x00]
+    match le_periodic_advertising_response_report(evt)
+        None    => test.fail("the Response Report decodes")
+        Some(r) =>
+            test.assert_eq(r.advertising_handle, 0x00)
+            test.assert_eq(r.subevent, 0x02)
+            test.assert_eq(r.tx_status, PAWR_TX_STATUS_SUCCESS)
+            test.assert_eq(list.len(r.responses), 2)
+            test.assert_eq(r.responses[0].response_slot, 0x00)
+            test.assert_eq(r.responses[0].data_status, PERIODIC_DATA_COMPLETE)
+            test.assert_eq(list.len(r.responses[0].data), 3)
+            test.assert_eq(r.responses[0].data[2] as Int, 0x06)
+            test.assert_eq(r.responses[1].response_slot, 0x03)
+            test.assert_eq(list.len(r.responses[1].data), 0)
+    // A failure report carries Tx_Status 0x01 and no response.
+    let failed: [u8] = [0x3E, 0x05, 0x28, 0x00, 0x02, 0x01, 0x00]
+    match le_periodic_advertising_response_report(failed)
+        None    => test.fail("a failure report decodes too")
+        Some(r) =>
+            test.assert_eq(r.tx_status, PAWR_TX_STATUS_FAILED)
+            test.assert_eq(list.len(r.responses), 0)
+    // A Num_Responses the event cannot hold is not a report.
+    let short: [u8] = [0x3E, 0x06, 0x28, 0x00, 0x02, 0x00, 0x01, 0x7F]
+    test.assert(le_periodic_advertising_response_report(short) == None)
+
+// ── Return parameters of the isochronous commands: tests ────────────
+
+@test
+@satisfies("REQ-BLE-HCI-057")
+fn test_command_complete_return_parameters_follow_status()
+    let evt: [u8] = [0x0E, 0x06, 0x01, 0x60, 0x20, 0x00, 0xFB, 0x00]
+    test.assert_eq(list.len(command_complete_return_parameters(evt)), 2)
+    test.assert_eq(command_complete_return_parameters(evt)[0] as Int, 0xFB)
+    test.assert_eq(list.len(command_complete_return_parameters([0x0E, 0x03, 0x01, 0x60, 0x20])), 0)
+
+@test
+@satisfies("REQ-BLE-HCI-057")
+fn test_le_buffer_size_v2_return_parameters()
+    match le_buffer_size_v2([0xFB, 0x00, 0x03, 0xFD, 0x00, 0x08])
+        None    => test.fail("the six octets decode")
+        Some(b) =>
+            test.assert_eq(b.acl_data_packet_length, 251)
+            test.assert_eq(b.total_acl_data_packets, 3)
+            test.assert_eq(b.iso_data_packet_length, 253)
+            test.assert_eq(b.total_iso_data_packets, 8)
+    test.assert(le_buffer_size_v2([0xFB, 0x00, 0x03]) == None)
+    test.assert(le_buffer_size_v2([0xFB, 0x00, 0x03, 0xFD, 0x00, 0x08, 0x00]) == None)
+
+@test
+@satisfies("REQ-BLE-HCI-057")
+fn test_le_read_iso_tx_sync_return_parameters()
+    let rp: [u8] = [0x42, 0x10, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12, 0x03, 0x02, 0x01]
+    match le_read_iso_tx_sync(rp)
+        None    => test.fail("eleven octets decode")
+        Some(s) =>
+            test.assert_eq(s.connection_handle, 0x0042)
+            test.assert_eq(s.packet_sequence_number, 0x1234)
+            test.assert_eq(s.tx_time_stamp, 0x12345678)
+            test.assert_eq(s.time_offset, 0x010203)
+    test.assert(le_read_iso_tx_sync(rp[0:10]) == None)
+
+@test
+@satisfies("REQ-BLE-HCI-057")
+fn test_le_set_cig_parameters_return_handles()
+    match le_set_cig_parameters_return([0x05, 0x01, 0x30, 0x00])
+        None    => test.fail("one handle decodes")
+        Some(r) =>
+            test.assert_eq(r.cig_id, 5)
+            test.assert_eq(list.len(r.connection_handles), 1)
+            test.assert_eq(r.connection_handles[0], 0x0030)
+    match le_set_cig_parameters_return([0x05, 0x03, 0x30, 0x00, 0x31, 0x00, 0x32, 0xF0])
+        None    => test.fail("three handles decode")
+        Some(r) =>
+            test.assert_eq(list.len(r.connection_handles), 3)
+            test.assert_eq(r.connection_handles[1], 0x0031)
+            test.assert_eq(r.connection_handles[2], 0x0032)
+    // CIS_Count disagrees with the list, and a list shorter than two octets.
+    test.assert(le_set_cig_parameters_return([0x05, 0x02, 0x30, 0x00]) == None)
+    test.assert(le_set_cig_parameters_return([0x05]) == None)
+    match le_set_cig_parameters_return([0x05, 0x00])
+        None    => test.fail("no CIS decodes")
+        Some(r) => test.assert_eq(list.len(r.connection_handles), 0)
+
+@test
+@satisfies("REQ-BLE-HCI-057")
+fn test_iso_handle_and_id_returns()
+    test.assert(iso_connection_handle_return([0x42, 0xF0]) == Some(0x0042))
+    test.assert(iso_connection_handle_return([0x42]) == None)
+    test.assert(iso_group_id_return([0x07]) == Some(7))
+    test.assert(iso_group_id_return([]) == None)
+    test.assert(iso_group_id_return([0x07, 0x00]) == None)
+
+@test
+@satisfies("REQ-BLE-HCI-057")
+fn test_iso_test_counters_and_link_quality_returns()
+    let c: [u8] = [0x41, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x80]
+    match iso_test_counters(c)
+        None    => test.fail("fourteen octets decode")
+        Some(t) =>
+            test.assert_eq(t.connection_handle, 0x0041)
+            test.assert_eq(t.received_sdu_count, 1)
+            test.assert_eq(t.missed_sdu_count, 2)
+            test.assert_eq(t.failed_sdu_count, 0x80000003)
+    test.assert(iso_test_counters(c[0:13]) == None)
+    var q: [u8] = [0x41, 0x00]
+    for i in 1..8
+        list.append(q, [i as u8, 0x00, 0x00, 0x00])
+    match iso_link_quality(q)
+        None    => test.fail("thirty octets decode")
+        Some(l) =>
+            test.assert_eq(l.connection_handle, 0x0041)
+            test.assert_eq(l.tx_unacked_packets, 1)
+            test.assert_eq(l.tx_flushed_packets, 2)
+            test.assert_eq(l.tx_last_subevent_packets, 3)
+            test.assert_eq(l.retransmitted_packets, 4)
+            test.assert_eq(l.crc_error_packets, 5)
+            test.assert_eq(l.rx_unreceived_packets, 6)
+            test.assert_eq(l.duplicate_packets, 7)
+    test.assert(iso_link_quality(q[0:29]) == None)
+
+// ── Isochronous channel events: tests ───────────────────────────────
+
+// An LE Meta event of `subevent` with the parameter octets `params`.
+@tier(app)
+fn le_meta_event(subevent: Int, params: [u8]) -> [u8]
+    var evt: [u8] = [0x3E, (list.len(params) + 1) as u8, subevent as u8]
+    list.append(evt, params)
+    evt
+
+// The parameters of an LE CIS Established event up to ISO_Interval, with
+// a different value in every field.
+@tier(app)
+fn cis_established_v1_params() -> [u8]
+    [0x00, 0x42, 0x1F,
+     0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C,
+     0x01, 0x02, 0x04, 0x03, 0x02, 0x05, 0x06,
+     0x10, 0x11, 0x12, 0x13, 0x14, 0x15]
+
+@test
+@satisfies("REQ-BLE-HCI-058")
+fn test_le_cis_established_v1_decodes()
+    let evt = le_meta_event(LE_SUBEVENT_CIS_ESTABLISHED, cis_established_v1_params())
+    test.assert_eq(list.len(evt), CIS_ESTABLISHED_LENGTH)
+    match le_cis_established(evt)
+        None    => test.fail("the [v1] event decodes")
+        Some(e) =>
+            test.assert(not e.v2)
+            test.assert_eq(e.status, 0)
+            // Connection_Handle is 12 bits: 0x1F42 reads 0x0F42.
+            test.assert_eq(e.connection_handle, 0x0F42)
+            test.assert_eq(e.cig_sync_delay, 0x030201)
+            test.assert_eq(e.cis_sync_delay, 0x060504)
+            test.assert_eq(e.transport_latency_c_to_p, 0x090807)
+            test.assert_eq(e.transport_latency_p_to_c, 0x0C0B0A)
+            test.assert_eq(e.phy_c_to_p, 1)
+            test.assert_eq(e.phy_p_to_c, 2)
+            test.assert_eq(e.nse, 4)
+            test.assert_eq(e.bn_c_to_p, 3)
+            test.assert_eq(e.bn_p_to_c, 2)
+            test.assert_eq(e.ft_c_to_p, 5)
+            test.assert_eq(e.ft_p_to_c, 6)
+            test.assert_eq(e.max_pdu_c_to_p, 0x1110)
+            test.assert_eq(e.max_pdu_p_to_c, 0x1312)
+            test.assert_eq(e.iso_interval, 0x1514)
+            test.assert_eq(e.framing, 0)
+            test.assert_eq(e.sdu_interval_p_to_c, 0)
+    // One octet short and one long, and the other subevent.
+    test.assert(le_cis_established(le_meta_event(LE_SUBEVENT_CIS_ESTABLISHED, cis_established_v1_params()[0:27])) == None)
+    var long = cis_established_v1_params()
+    list.push(long, 0x00)
+    test.assert(le_cis_established(le_meta_event(LE_SUBEVENT_CIS_ESTABLISHED, long)) == None)
+    test.assert(le_cis_established(le_meta_event(LE_SUBEVENT_CIS_REQUEST, cis_established_v1_params())) == None)
+
+@test
+@satisfies("REQ-BLE-HCI-058")
+fn test_le_cis_established_v2_decodes()
+    var params = cis_established_v1_params()
+    list.append(params, [0x21, 0x22, 0x23, 0x31, 0x32, 0x41, 0x42, 0x51, 0x52, 0x53, 0x61, 0x62, 0x63, 0x02])
+    let evt = le_meta_event(LE_SUBEVENT_CIS_ESTABLISHED_V2, params)
+    test.assert_eq(list.len(evt), CIS_ESTABLISHED_V2_LENGTH)
+    match le_cis_established(evt)
+        None    => test.fail("the [v2] event decodes")
+        Some(e) =>
+            test.assert(e.v2)
+            test.assert_eq(e.iso_interval, 0x1514)
+            test.assert_eq(e.sub_interval, 0x232221)
+            test.assert_eq(e.max_sdu_c_to_p, 0x3231)
+            test.assert_eq(e.max_sdu_p_to_c, 0x4241)
+            test.assert_eq(e.sdu_interval_c_to_p, 0x535251)
+            test.assert_eq(e.sdu_interval_p_to_c, 0x636261)
+            test.assert_eq(e.framing, 2)
+    // The [v2] parameters under the [v1] subevent are a length mismatch.
+    test.assert(le_cis_established(le_meta_event(LE_SUBEVENT_CIS_ESTABLISHED, params)) == None)
+    test.assert(le_cis_established(le_meta_event(LE_SUBEVENT_CIS_ESTABLISHED_V2, params[0:30])) == None)
+
+@test
+@satisfies("REQ-BLE-HCI-058")
+fn test_le_cis_request_decodes()
+    let evt = le_meta_event(LE_SUBEVENT_CIS_REQUEST, [0x01, 0xF0, 0x30, 0x80, 0x07, 0x09])
+    match le_cis_request(evt)
+        None    => test.fail("the event decodes")
+        Some(r) =>
+            test.assert_eq(r.acl_connection_handle, 0x0001)
+            test.assert_eq(r.cis_connection_handle, 0x0030)
+            test.assert_eq(r.cig_id, 7)
+            test.assert_eq(r.cis_id, 9)
+    test.assert(le_cis_request(evt[0:8]) == None)
+    test.assert(le_cis_request(le_meta_event(LE_SUBEVENT_CIS_ESTABLISHED, [0x01, 0xF0, 0x30, 0x80, 0x07, 0x09])) == None)
+    test.assert(le_cis_request([0x05, 0x04, 0x00, 0x01, 0x00, 0x13]) == None)
+
+@tier(app)
+fn create_big_complete_params(handles: [Int]) -> [u8]
+    var params: [u8] = [0x00, 0x03, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x02, 0x03, 0x04, 0x05, 0x06, 0x10, 0x11, 0x12, 0x13, list.len(handles) as u8]
+    for h in handles
+        list.append(params, [(h & 0xFF) as u8, ((h >>> 8) & 0xFF) as u8])
+    params
+
+@test
+@satisfies("REQ-BLE-HCI-058")
+fn test_le_create_big_complete_decodes_one_and_three_bis()
+    match le_create_big_complete(le_meta_event(LE_SUBEVENT_CREATE_BIG_COMPLETE, create_big_complete_params([0x0040])))
+        None    => test.fail("one BIS decodes")
+        Some(e) =>
+            test.assert_eq(e.status, 0)
+            test.assert_eq(e.big_handle, 3)
+            test.assert_eq(e.big_sync_delay, 0x030201)
+            test.assert_eq(e.transport_latency_big, 0x060504)
+            test.assert_eq(e.phy, 2)
+            test.assert_eq(e.nse, 3)
+            test.assert_eq(e.bn, 4)
+            test.assert_eq(e.pto, 5)
+            test.assert_eq(e.irc, 6)
+            test.assert_eq(e.max_pdu, 0x1110)
+            test.assert_eq(e.iso_interval, 0x1312)
+            test.assert_eq(list.len(e.connection_handles), 1)
+            test.assert_eq(e.connection_handles[0], 0x0040)
+    match le_create_big_complete(le_meta_event(LE_SUBEVENT_CREATE_BIG_COMPLETE, create_big_complete_params([0x0040, 0x0041, 0xF042])))
+        None    => test.fail("three BIS decode")
+        Some(e) =>
+            test.assert_eq(list.len(e.connection_handles), 3)
+            test.assert_eq(e.connection_handles[1], 0x0041)
+            // 12 bits meaningful.
+            test.assert_eq(e.connection_handles[2], 0x0042)
+    // Num_BIS says 3, the event holds 2; and the event is cut inside its fixed part.
+    var wrong = create_big_complete_params([0x0040, 0x0041])
+    wrong[17] = 0x03
+    test.assert(le_create_big_complete(le_meta_event(LE_SUBEVENT_CREATE_BIG_COMPLETE, wrong)) == None)
+    test.assert(le_create_big_complete(le_meta_event(LE_SUBEVENT_CREATE_BIG_COMPLETE, [0x00, 0x03])) == None)
+    test.assert(le_create_big_complete(le_meta_event(LE_SUBEVENT_BIG_SYNC_ESTABLISHED, create_big_complete_params([0x0040]))) == None)
+
+@test
+@satisfies("REQ-BLE-HCI-058")
+fn test_le_terminate_big_complete_and_sync_lost_decode()
+    match le_terminate_big_complete(le_meta_event(LE_SUBEVENT_TERMINATE_BIG_COMPLETE, [0x02, 0x16]))
+        None    => test.fail("the event decodes")
+        Some(e) =>
+            test.assert_eq(e.big_handle, 2)
+            test.assert_eq(e.reason, 0x16)
+    match le_big_sync_lost(le_meta_event(LE_SUBEVENT_BIG_SYNC_LOST, [0x01, 0x08]))
+        None    => test.fail("the event decodes")
+        Some(e) =>
+            test.assert_eq(e.big_handle, 1)
+            test.assert_eq(e.reason, 0x08)
+    // Each refuses the other's subevent and a wrong length.
+    test.assert(le_terminate_big_complete(le_meta_event(LE_SUBEVENT_BIG_SYNC_LOST, [0x01, 0x08])) == None)
+    test.assert(le_big_sync_lost(le_meta_event(LE_SUBEVENT_TERMINATE_BIG_COMPLETE, [0x01, 0x08])) == None)
+    test.assert(le_big_sync_lost(le_meta_event(LE_SUBEVENT_BIG_SYNC_LOST, [0x01])) == None)
+    test.assert(le_terminate_big_complete(le_meta_event(LE_SUBEVENT_TERMINATE_BIG_COMPLETE, [0x01, 0x08, 0x00])) == None)
+
+@tier(app)
+fn big_sync_established_params(handles: [Int]) -> [u8]
+    var params: [u8] = [0x00, 0x01, 0x0A, 0x0B, 0x0C, 0x02, 0x03, 0x04, 0x05, 0x20, 0x21, 0x22, 0x23, list.len(handles) as u8]
+    for h in handles
+        list.append(params, [(h & 0xFF) as u8, ((h >>> 8) & 0xFF) as u8])
+    params
+
+@test
+@satisfies("REQ-BLE-HCI-058")
+fn test_le_big_sync_established_decodes_one_and_three_bis()
+    match le_big_sync_established(le_meta_event(LE_SUBEVENT_BIG_SYNC_ESTABLISHED, big_sync_established_params([0x0050])))
+        None    => test.fail("one BIS decodes")
+        Some(e) =>
+            test.assert_eq(e.status, 0)
+            test.assert_eq(e.big_handle, 1)
+            test.assert_eq(e.transport_latency_big, 0x0C0B0A)
+            test.assert_eq(e.nse, 2)
+            test.assert_eq(e.bn, 3)
+            test.assert_eq(e.pto, 4)
+            test.assert_eq(e.irc, 5)
+            test.assert_eq(e.max_pdu, 0x2120)
+            test.assert_eq(e.iso_interval, 0x2322)
+            test.assert_eq(list.len(e.connection_handles), 1)
+            test.assert_eq(e.connection_handles[0], 0x0050)
+    match le_big_sync_established(le_meta_event(LE_SUBEVENT_BIG_SYNC_ESTABLISHED, big_sync_established_params([0x0050, 0x0051, 0x0052])))
+        None    => test.fail("three BIS decode")
+        Some(e) =>
+            test.assert_eq(list.len(e.connection_handles), 3)
+            test.assert_eq(e.connection_handles[2], 0x0052)
+    var wrong = big_sync_established_params([0x0050])
+    wrong[13] = 0x02
+    test.assert(le_big_sync_established(le_meta_event(LE_SUBEVENT_BIG_SYNC_ESTABLISHED, wrong)) == None)
+    test.assert(le_big_sync_established(le_meta_event(LE_SUBEVENT_BIG_SYNC_ESTABLISHED, [0x00])) == None)
+
+@test
+@satisfies("REQ-BLE-HCI-058")
+fn test_le_big_info_advertising_report_decodes()
+    let params: [u8] = [0x34, 0xF2, 0x02, 0x03, 0x08, 0x00, 0x02, 0x01, 0x03, 0x64, 0x00, 0x10, 0x27, 0x00, 0x64, 0x00, 0x02, 0x01, 0x01]
+    match le_big_info_advertising_report(le_meta_event(LE_SUBEVENT_BIG_INFO_ADVERTISING_REPORT, params))
+        None    => test.fail("the report decodes")
+        Some(r) =>
+            test.assert_eq(r.sync_handle, 0x0234)
+            test.assert_eq(r.num_bis, 2)
+            test.assert_eq(r.nse, 3)
+            test.assert_eq(r.iso_interval, 8)
+            test.assert_eq(r.bn, 2)
+            test.assert_eq(r.pto, 1)
+            test.assert_eq(r.irc, 3)
+            test.assert_eq(r.max_pdu, 100)
+            test.assert_eq(r.sdu_interval, 10000)
+            test.assert_eq(r.max_sdu, 100)
+            test.assert_eq(r.phy, 2)
+            test.assert_eq(r.framing, 1)
+            test.assert(r.encryption)
+    var clear = params[:]
+    clear[18] = 0x00
+    match le_big_info_advertising_report(le_meta_event(LE_SUBEVENT_BIG_INFO_ADVERTISING_REPORT, clear))
+        None    => test.fail("an unencrypted report decodes")
+        Some(r) => test.assert(not r.encryption)
+    test.assert(le_big_info_advertising_report(le_meta_event(LE_SUBEVENT_BIG_INFO_ADVERTISING_REPORT, params[0:18])) == None)
+    test.assert(le_big_info_advertising_report(le_meta_event(LE_SUBEVENT_BIG_SYNC_LOST, params)) == None)
+
+@test
+@satisfies("REQ-BLE-HCI-058")
+fn test_iso_event_shape_refuses_other_events()
+    // An event that is not an LE Meta event, and an empty one.
+    test.assert(not iso_event_shape([0x05, 0x04, 0x00, 0x01, 0x00, 0x13], 0x1A, 6))
+    test.assert(not iso_event_shape([], 0x1A, 0))
+    // Parameter_Total_Length that disagrees with the packet.
+    test.assert(not iso_event_shape([0x3E, 0x09, 0x1A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], 0x1A, 9))
+
+// ── HCI ISO Data packets: tests ─────────────────────────────────────
+
+@tier(app)
+fn iso_fragment(handle: Int, pb: Int, data: [u8]) -> IsoDataPacket
+    IsoDataPacket {
+        connection_handle: handle, pb_flag: pb, has_sdu_header: false, has_time_stamp: false,
+        time_stamp: 0, packet_sequence_number: 0, iso_sdu_length: 0, packet_status: 0, data: data }
+
+@tier(app)
+fn iso_sdu_packet(handle: Int, pb: Int, ts: ?Int, seq: Int, sdu_length: Int, status: Int, data: [u8]) -> IsoDataPacket
+    IsoDataPacket {
+        connection_handle: handle, pb_flag: pb, has_sdu_header: true,
+        has_time_stamp: ts != None, time_stamp: ts ?? 0,
+        packet_sequence_number: seq, iso_sdu_length: sdu_length, packet_status: status, data: data }
+
+@test
+@satisfies("REQ-BLE-ISO-001")
+fn test_build_iso_data_packet_complete_sdu_without_time_stamp()
+    // Handle 0x0123, PB 0b10, TS 0: octets 0x23 and 0x01 | 0x20.  The load
+    // is Packet_Sequence_Number 0x0007, ISO_SDU_Length 3 and three octets.
+    match build_iso_data_packet(iso_sdu_packet(0x0123, ISO_PB_COMPLETE_SDU, None, 7, 3, 0, [0xAA, 0xBB, 0xCC]))
+        None    => test.fail("the packet fits")
+        Some(p) =>
+            let want: [u8] = [0x23, 0x21, 0x07, 0x00, 0x07, 0x00, 0x03, 0x00, 0xAA, 0xBB, 0xCC]
+            test.assert_eq(list.len(p), list.len(want))
+            for i in 0..list.len(want)
+                test.assert_eq(p[i] as Int, want[i] as Int)
+
+@test
+@satisfies("REQ-BLE-ISO-001")
+fn test_build_iso_data_packet_time_stamp_and_status()
+    // TS_Flag adds bit 6 of the second octet and four octets of
+    // Time_Stamp; Packet_Status_Flag 0b10 lands in bits 14 and 15 of the
+    // word that holds ISO_SDU_Length.
+    match build_iso_data_packet(iso_sdu_packet(0x0040, ISO_PB_COMPLETE_SDU, Some(0x01020304), 0x1234, 0, ISO_PSF_LOST, []))
+        None    => test.fail("the packet fits")
+        Some(p) =>
+            let want: [u8] = [0x40, 0x60, 0x08, 0x00, 0x04, 0x03, 0x02, 0x01, 0x34, 0x12, 0x00, 0x80]
+            test.assert_eq(list.len(p), list.len(want))
+            for i in 0..list.len(want)
+                test.assert_eq(p[i] as Int, want[i] as Int)
+    match build_h4_iso(iso_sdu_packet(0x0040, ISO_PB_FIRST_FRAGMENT, None, 1, 300, 0, [0x11, 0x22]))
+        None    => test.fail("the packet fits")
+        Some(p) =>
+            // HCI packet indicator, PB 0b00, Data_Total_Length 6, then the
+            // SDU header: ISO_SDU_Length 300 = 0x012C.
+            let want: [u8] = [0x05, 0x40, 0x00, 0x06, 0x00, 0x01, 0x00, 0x2C, 0x01, 0x11, 0x22]
+            test.assert_eq(list.len(p), list.len(want))
+            for i in 0..list.len(want)
+                test.assert_eq(p[i] as Int, want[i] as Int)
+
+@test
+@satisfies("REQ-BLE-ISO-001")
+fn test_build_iso_data_packet_fragments_carry_no_sdu_header()
+    match build_iso_data_packet(iso_fragment(0x0040, ISO_PB_INTERMEDIATE_FRAGMENT, [0x01, 0x02, 0x03]))
+        None    => test.fail("the fragment fits")
+        Some(p) =>
+            let want: [u8] = [0x40, 0x10, 0x03, 0x00, 0x01, 0x02, 0x03]
+            test.assert_eq(list.len(p), list.len(want))
+            for i in 0..list.len(want)
+                test.assert_eq(p[i] as Int, want[i] as Int)
+    match build_iso_data_packet(iso_fragment(0x0040, ISO_PB_LAST_FRAGMENT, []))
+        None    => test.fail("an empty last fragment fits")
+        Some(p) =>
+            test.assert_eq(list.len(p), 4)
+            test.assert_eq(p[1] as Int, 0x30)
+
+@test
+@satisfies("REQ-BLE-ISO-001")
+fn test_build_iso_data_packet_refuses_what_does_not_fit()
+    let data: [u8] = [0x00]
+    // A handle above 0x0EFF, a PB_Flag above 3, an ISO_SDU_Length above
+    // 0x0FFF, a Packet_Status_Flag above 3.
+    test.assert(build_iso_data_packet(iso_sdu_packet(0x0F00, ISO_PB_COMPLETE_SDU, None, 0, 1, 0, data)) == None)
+    test.assert(build_iso_data_packet(iso_sdu_packet(0x0001, 4, None, 0, 1, 0, data)) == None)
+    test.assert(build_iso_data_packet(iso_sdu_packet(0x0001, ISO_PB_COMPLETE_SDU, None, 0, 0x1000, 0, data)) == None)
+    test.assert(build_iso_data_packet(iso_sdu_packet(0x0001, ISO_PB_COMPLETE_SDU, None, 0, 1, 4, data)) == None)
+    // Packet_Sequence_Number is 16 bits and Time_Stamp 32 ([Vol 4] Part E,
+    // Section 5.4.5): the widest values fit, one more bit does not.
+    test.assert(build_iso_data_packet(iso_sdu_packet(0x0001, ISO_PB_COMPLETE_SDU, None, 0xFFFF, 1, 0, data)) != None)
+    test.assert(build_iso_data_packet(iso_sdu_packet(0x0001, ISO_PB_COMPLETE_SDU, None, 0x10000, 1, 0, data)) == None)
+    test.assert(build_iso_data_packet(iso_sdu_packet(0x0001, ISO_PB_COMPLETE_SDU, None, -1, 1, 0, data)) == None)
+    test.assert(build_iso_data_packet(iso_sdu_packet(0x0001, ISO_PB_COMPLETE_SDU, Some(0xFFFFFFFF), 0, 1, 0, data)) != None)
+    test.assert(build_iso_data_packet(iso_sdu_packet(0x0001, ISO_PB_COMPLETE_SDU, Some(0x100000000), 0, 1, 0, data)) == None)
+    // A fragment with a Time_Stamp has nowhere to put it.
+    let ts = IsoDataPacket {
+        connection_handle: 0x0001, pb_flag: ISO_PB_LAST_FRAGMENT, has_sdu_header: false, has_time_stamp: true,
+        time_stamp: 1, packet_sequence_number: 0, iso_sdu_length: 0, packet_status: 0, data: data }
+    test.assert(build_iso_data_packet(ts) == None)
+    // Data_Total_Length is 14 bits: 0x3FFF octets fit a fragment, one more does not.
+    var big: [u8] = []
+    for _ in 0..0x3FFF
+        list.push(big, 0x00)
+    match build_iso_data_packet(iso_fragment(0x0001, ISO_PB_INTERMEDIATE_FRAGMENT, big))
+        None    => test.fail("0x3FFF octets fit")
+        Some(p) =>
+            test.assert_eq(p[2] as Int, 0xFF)
+            test.assert_eq(p[3] as Int, 0x3F)
+    list.push(big, 0x00)
+    test.assert(build_iso_data_packet(iso_fragment(0x0001, ISO_PB_INTERMEDIATE_FRAGMENT, big)) == None)
+
+@test
+@satisfies("REQ-BLE-ISO-001")
+fn test_iso_data_packet_round_trip()
+    let sdus = [iso_sdu_packet(0x0123, ISO_PB_COMPLETE_SDU, None, 7, 3, ISO_PSF_VALID, [0xAA, 0xBB, 0xCC]),
+                iso_sdu_packet(0x0040, ISO_PB_COMPLETE_SDU, Some(0xDEADBEEF), 0xFFFF, 0, ISO_PSF_LOST, []),
+                iso_sdu_packet(0x0EFF, ISO_PB_FIRST_FRAGMENT, Some(1), 2, 0x0FFF, ISO_PSF_POSSIBLY_INVALID, [0x01]),
+                iso_fragment(0x0001, ISO_PB_INTERMEDIATE_FRAGMENT, [0x09, 0x08]),
+                iso_fragment(0x0001, ISO_PB_LAST_FRAGMENT, [])]
+    for want in sdus
+        match build_iso_data_packet(want)
+            None      => test.fail("the packet builds")
+            Some(wire) =>
+                match iso_data_packet(wire)
+                    None    => test.fail("the packet parses")
+                    Some(got) =>
+                        test.assert_eq(got.connection_handle, want.connection_handle)
+                        test.assert_eq(got.pb_flag, want.pb_flag)
+                        test.assert_eq(got.has_sdu_header, want.has_sdu_header)
+                        test.assert_eq(got.has_time_stamp, want.has_time_stamp)
+                        test.assert_eq(got.time_stamp, want.time_stamp)
+                        test.assert_eq(got.packet_sequence_number, want.packet_sequence_number)
+                        test.assert_eq(got.iso_sdu_length, want.iso_sdu_length)
+                        test.assert_eq(got.packet_status, want.packet_status)
+                        test.assert_eq(list.len(got.data), list.len(want.data))
+                        for i in 0..list.len(want.data)
+                            test.assert_eq(got.data[i] as Int, want.data[i] as Int)
+
+@test
+@satisfies("REQ-BLE-ISO-001")
+fn test_iso_data_packet_refusals()
+    // Shorter than the header, and a Data_Total_Length that disagrees.
+    test.assert(iso_data_packet([0x40, 0x20, 0x00]) == None)
+    test.assert(iso_data_packet([0x40, 0x20, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00]) == None)
+    test.assert(iso_data_packet([0x40, 0x20, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00]) == None)
+    // A packet with the SDU header and fewer than four octets of load, and
+    // fewer than eight with TS_Flag.
+    test.assert(iso_data_packet([0x40, 0x20, 0x03, 0x00, 0x01, 0x00, 0x00]) == None)
+    test.assert(iso_data_packet([0x40, 0x60, 0x07, 0x00, 0x01, 0x02, 0x03, 0x04, 0x01, 0x00, 0x00]) == None)
+    // A last fragment with TS_Flag set.
+    test.assert(iso_data_packet([0x40, 0x70, 0x01, 0x00, 0xAA]) == None)
+    // The reserved bit above TS_Flag and the reserved bits above
+    // Data_Total_Length are ignored.
+    match iso_data_packet([0x40, 0xA0, 0x04, 0xC0, 0x01, 0x00, 0x00, 0x00])
+        None    => test.fail("reserved bits are ignored")
+        Some(p) =>
+            test.assert_eq(p.pb_flag, ISO_PB_COMPLETE_SDU)
+            test.assert_eq(list.len(p.data), 0)
