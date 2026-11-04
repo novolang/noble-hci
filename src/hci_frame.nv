@@ -1,108 +1,98 @@
-// orbit/noble-hci/src/hci_frame.nv — HCI packet framing (Core Vol 4 Part E §5.4).
+// HCI packet headers and constants ([Vol 4] Part E, Section 5.4).
 //
-// Three packet types carry the host↔controller traffic this stack
-// needs:
+// The packets that cross the Host-Controller interface:
 //
-//   HCI Command (host → controller)
-//     | OpCode (2 bytes LE) | ParamLen (1 byte) | Params (0-255) |
+//   HCI Command (Host to Controller)   | Opcode (2) | Parameter_Total_Length (1) | Parameters |
+//   HCI Event (Controller to Host)     | Event_Code (1) | Parameter_Total_Length (1) | Parameters |
+//   HCI ACL Data (both directions)     | Handle and flags (2) | Data_Total_Length (2) | Data |
 //
-//   HCI Event (controller → host)
-//     | EventCode (1 byte) | ParamLen (1 byte) | Params (0-255) |
+// Multi-octet fields are little-endian.  An opcode is the 6-bit OGF above the 10-bit OCF.  The handle and flags of
+// an ACL packet pack a 12-bit connection handle, a 2-bit Packet_Boundary_Flag and a 2-bit Broadcast_Flag.
 //
-//   HCI ACL Data (bi-directional)
-//     | HandleFlags (2 bytes LE) | DataLen (2 bytes LE) | Data (0-N) |
+// The module holds the OGF and event-code constants, the opcode and ACL-field pack and split functions, the three
+// header structs with their `frame` compositions, and `HciCmdMsg` and `HciEvtMsg`, the typed form a transport hands
+// to a Host.
+
+// Opcode Group Field of the Link Control commands, 0x01 ([Vol 4] Part E, Section 7.1).
+pub const OGF_LINK_CONTROL = 0x01
+
+// Opcode Group Field of the Controller and Baseband commands, 0x03 ([Vol 4] Part E, Section 7.3).
+pub const OGF_CONTROLLER_BASEBAND = 0x03
+
+// Opcode Group Field of the Informational Parameters commands, 0x04 ([Vol 4] Part E, Section 7.4).
+pub const OGF_INFORMATIONAL_PARAMETERS = 0x04
+
+// Opcode Group Field of the Status Parameters commands, 0x05 ([Vol 4] Part E, Section 7.5).
+pub const OGF_STATUS_PARAMETERS = 0x05
+
+// Opcode Group Field of the LE Controller commands, 0x08 ([Vol 4] Part E, Section 7.8).
+pub const OGF_LE_CONTROLLER = 0x08
+
+// Opcode Group Field of the vendor-specific commands, 0x3F.
+pub const OGF_VENDOR_SPECIFIC = 0x3F
+
+// Event code of Disconnection Complete, 0x05 ([Vol 4] Part E, Section 7.7.5).
+pub const EVT_DISCONNECTION_COMPLETE = 0x05
+
+// Event code of Encryption Change, 0x08 ([Vol 4] Part E, Section 7.7.8).
+pub const EVT_ENCRYPTION_CHANGE = 0x08
+
+// Event code of Command Complete, 0x0E ([Vol 4] Part E, Section 7.7.14).
+pub const EVT_COMMAND_COMPLETE = 0x0E
+
+// Event code of Command Status, 0x0F ([Vol 4] Part E, Section 7.7.15).
+pub const EVT_COMMAND_STATUS = 0x0F
+
+// Event code of Hardware Error, 0x10 ([Vol 4] Part E, Section 7.7.16).
+pub const EVT_HARDWARE_ERROR = 0x10
+
+// Event code of Number Of Completed Packets, 0x13 ([Vol 4] Part E, Section 7.7.19).
+pub const EVT_NUMBER_OF_COMPLETED_PACKETS = 0x13
+
+// Event code of the LE Meta event, 0x3E, which carries every LE event under a Subevent_Code ([Vol 4] Part E, Section 7.7.65).
+pub const EVT_LE_META_EVENT = 0x3E
+
+// H4 packet-type byte of an HCI Command packet, 0x01; the same value as `hci_h4.PKT_COMMAND`.
+pub const H4_PKT_COMMAND = 0x01
+
+// H4 packet-type byte of an HCI ACL Data packet, 0x02; the same value as `hci_h4.PKT_ACL`.
+pub const H4_PKT_ACL = 0x02
+
+// H4 packet-type byte of an HCI SCO Data packet, 0x03; the same value as `hci_h4.PKT_SCO`.  LE does not use it.
+pub const H4_PKT_SCO = 0x03
+
+// H4 packet-type byte of an HCI Event packet, 0x04; the same value as `hci_h4.PKT_EVENT`.
+pub const H4_PKT_EVENT = 0x04
+
+// H4 packet-type byte of an HCI ISO Data packet, 0x05; the same value as `hci_h4.PKT_ISO`.
+pub const H4_PKT_ISO = 0x05
+
+// The 16-bit opcode of command `ocf` in group `ogf`: the OGF in bits 10 to 15 and the OCF in bits 0 to 9.
 //
-// OpCode is the canonical 16-bit OGF (6 bits) | OCF (10 bits)
-// form, transmitted little-endian.  Event codes are 8-bit
-// identifiers (Core Vol 4 Part E §7.7).  ACL handle_flags pack
-// a 12-bit ConnectionHandle with a 2-bit Packet_Boundary_Flag
-// and a 2-bit Broadcast_Flag.
-//
-// Each header is declared with `@little_endian` + a `frame`
-// composition so the compiler auto-generates serialize /
-// deserialize round-trip functions.
-//
-// Satisfies: REQ-BLE-HCI-001 (command format), REQ-BLE-HCI-002
-// (event format), REQ-BLE-L2CAP-018 (HCI-ACL Packet_Boundary
-// flag encoding).
-
-use std.test
-use std.bits
-
-// ── OGF (Opcode Group Field) constants ───────────────────────────────
-//
-// Six most-significant bits of the 16-bit OpCode.  Core Vol 4
-// Part E §5.4.1 enumerates eight groups; we list the subset BLE
-// actually exercises.
-
-const OGF_LINK_CONTROL = 0x01
-
-const OGF_CONTROLLER_BASEBAND = 0x03
-
-const OGF_INFORMATIONAL_PARAMETERS = 0x04
-
-const OGF_STATUS_PARAMETERS = 0x05
-
-const OGF_LE_CONTROLLER = 0x08
-
-const OGF_VENDOR_SPECIFIC = 0x3F
-
-// ── Event codes (Core Vol 4 Part E §7.7) ────────────────────────────
-
-const EVT_DISCONNECTION_COMPLETE = 0x05
-
-const EVT_ENCRYPTION_CHANGE = 0x08
-
-const EVT_COMMAND_COMPLETE = 0x0E
-
-const EVT_COMMAND_STATUS = 0x0F
-
-const EVT_HARDWARE_ERROR = 0x10
-
-const EVT_NUMBER_OF_COMPLETED_PACKETS = 0x13
-
-const EVT_LE_META_EVENT = 0x3E
-
-// ── Packet-type bytes for H4 transport (Vol 4 Part A §2) ────────────
-//
-// Not strictly HCI header content — declared here since every
-// H4-framed HCI packet is prefixed with one of these bytes.
-
-const H4_PKT_COMMAND = 0x01
-
-const H4_PKT_ACL = 0x02
-
-const H4_PKT_SCO = 0x03
-
-const H4_PKT_EVENT = 0x04
-
-const H4_PKT_ISO = 0x05
-
-// ── OpCode pack / unpack ─────────────────────────────────────────────
-//
-// OGF sits in bits 10-15, OCF in bits 0-9.  Wire order is
-// little-endian as usual.
-
-@tier(embedded)
+// Bits of `ogf` above the sixth and bits of `ocf` above the tenth are dropped.  `pack_opcode(0x03, 0x003)` is 0x0C03,
+// HCI_Reset.  On the wire the opcode is little-endian ([Vol 4] Part E, Section 5.4.1).
+pub @tier(embedded)
 @no_alloc
 fn pack_opcode(ogf: Int, ocf: Int) -> Int
     let g = (ogf & 0x3F) << 10
     let c = ocf & 0x3FF
     g | c
 
-@tier(embedded)
+// The OGF of `opcode`: bits 10 to 15, 0 to 63.
+pub @tier(embedded)
 @no_alloc
 fn opcode_ogf(opcode: Int) -> Int
     (opcode >>> 10) & 0x3F
 
-@tier(embedded)
+// The OCF of `opcode`: bits 0 to 9, 0 to 1023.
+pub @tier(embedded)
 @no_alloc
 fn opcode_ocf(opcode: Int) -> Int
     opcode & 0x3FF
 
-// ── HCI Command header + frame ───────────────────────────────────────
-
-@satisfies("REQ-BLE-ARCH-001")
+// The header of an HCI Command packet: the 16-bit `opcode` and the `length` of the parameters in octets, little-endian
+// ([Vol 4] Part E, Section 5.4.1).
+pub @satisfies("REQ-BLE-ARCH-001")
 @little_endian
 struct HciCmdHeader
     opcode: u16
@@ -110,93 +100,80 @@ struct HciCmdHeader
 
 frame HciCmd = HciCmdHeader ++ [u8]
 
-// ── HCI Event header + frame ─────────────────────────────────────────
-
-@little_endian
+// The header of an HCI Event packet: the event `code` and the `length` of the parameters in octets
+// ([Vol 4] Part E, Section 5.4.4).
+pub @little_endian
 struct HciEvtHeader
     code: u8
     length: u8
 
 frame HciEvt = HciEvtHeader ++ [u8]
 
-// ── HCI ACL Data header + frame ──────────────────────────────────────
+// The header of an HCI ACL Data packet, little-endian ([Vol 4] Part E, Section 5.4.2).
 //
-// handle_flags layout (little-endian 16-bit):
-//   bits 0-11  — ConnectionHandle
-//   bits 12-13 — Packet_Boundary_Flag
-//                   0b00 First Non-Flushable
-//                   0b10 First Automatically-Flushable (LE uses this)
-//                   0b01 Continuation
-//                   0b11 Reserved for BR/EDR
-//   bits 14-15 — Broadcast_Flag (always 0 for LE)
-
-@little_endian
+// `handle_flags` holds the 12-bit connection handle in bits 0 to 11, the Packet_Boundary_Flag in bits 12 and 13 and the
+// Broadcast_Flag in bits 14 and 15; `pack_acl_handle_flags`, `acl_handle`, `acl_pb_flag` and `acl_bc_flag` build and split
+// it.  `length` is the Data_Total_Length in octets.
+pub @little_endian
 struct HciAclHeader
     handle_flags: u16
     length: u16
 
 frame HciAcl = HciAclHeader ++ [u8]
 
-// ── ACL handle_flags pack / unpack ──────────────────────────────────
+// Packet_Boundary_Flag 0b10: the first, automatically flushable, fragment of an L2CAP PDU, which is what an LE Host sends.
+pub const PB_FLAG_START_FLUSHABLE = 0x2
 
-const PB_FLAG_START_FLUSHABLE = 0x2
+// Packet_Boundary_Flag 0b01: a continuing fragment of an L2CAP PDU.
+pub const PB_FLAG_CONTINUATION = 0x1
 
-const PB_FLAG_CONTINUATION = 0x1
-
-@satisfies("REQ-BLE-LL-069")
+// The `handle_flags` field of an ACL Data header: `handle` in bits 0 to 11, `pb` in bits 12 and 13 and `bc` in bits 14 and 15.
+//
+// Each argument is masked to its width.  `pb` is a Packet_Boundary_Flag (`PB_FLAG_START_FLUSHABLE` or `PB_FLAG_CONTINUATION`)
+// and `bc` is the Broadcast_Flag, 0 on an LE link.
+pub @satisfies("REQ-BLE-LL-069")
 @tier(embedded)
 @no_alloc
 fn pack_acl_handle_flags(handle: Int, pb: Int, bc: Int) -> Int
     let h = handle & 0xFFF
     let p = (pb & 0x3) << 12
     let b = (bc & 0x3) << 14
-    (h | p) | b
+    h | p | b
 
-@tier(embedded)
+// The 12-bit connection handle of an ACL `handle_flags` field, 0 to 0x0FFF.
+pub @tier(embedded)
 @no_alloc
 fn acl_handle(handle_flags: Int) -> Int
     handle_flags & 0xFFF
 
-@tier(embedded)
+// The Packet_Boundary_Flag of an ACL `handle_flags` field, bits 12 and 13, 0 to 3.
+pub @tier(embedded)
 @no_alloc
 fn acl_pb_flag(handle_flags: Int) -> Int
     (handle_flags >>> 12) & 0x3
 
-@tier(embedded)
+// The Broadcast_Flag of an ACL `handle_flags` field, bits 14 and 15, 0 to 3.
+pub @tier(embedded)
 @no_alloc
 fn acl_bc_flag(handle_flags: Int) -> Int
     (handle_flags >>> 14) & 0x3
 
-// ── Typed HCI message structs + encode/decode ───────────────────────
-//
-// Distinct from the layered `frame HciCmd` / `frame HciEvt` above
-// (which exist for serialize/deserialize of full wire frames per
-// REQ-BLE-ARCH-001).  These `HciCmdMsg` / `HciEvtMsg` structs are
-// the trait-boundary message types — what `trait HciTransport`
-// hands to and from callers.
-//
-// Used by the typed `trait HciTransport` (see
-// orbit/ble/src/common/hci_transport.nv).  Transports that carry typed
-// messages (HciRam) bind their `type CmdFrame = HciCmdMsg` /
-// `type EvtFrame = HciEvtMsg`; byte-stream transports (HciUart,
-// HciUsbCdc when they land) bind the same and encode/decode at
-// the trait boundary so callers always speak in HCI semantics.
-//
-// In-RAM wire layout (no H4 type prefix — direction is carried by
-// the ring slot choice):
-//
-//   HciCmdMsg:   opcode_lo  opcode_hi  param_len  params...
-//   HciEvtMsg:   event_code  param_len  params...
-
-struct HciCmdMsg
+// A command as a Host hands it to a transport: the 16-bit `opcode` and the `params` octets, without the length octet or an
+// H4 type byte.
+pub struct HciCmdMsg
     opcode: Int
     params: [u8]
 
-struct HciEvtMsg
+// An event as a transport hands it to a Host: the `event_code` and the `params` octets, without the length octet or an H4 type
+// byte.
+pub struct HciEvtMsg
     event_code: Int
     params: [u8]
 
-@tier(embedded)
+// The wire form of `cmd`: the opcode (2 octets, little-endian), the parameter length (1 octet) and the parameters.
+//
+// The H4 type byte is not added; `hci_h4.frame_h4` does that.  The parameters must not exceed 255 octets.
+pub @tier(embedded)
 fn encode_hci_cmd_msg(cmd: HciCmdMsg) -> [u8]
     let opcode_lo = (cmd.opcode & 0xFF) as u8
     let opcode_hi = ((cmd.opcode >>> 8) & 0xFF) as u8
@@ -204,123 +181,28 @@ fn encode_hci_cmd_msg(cmd: HciCmdMsg) -> [u8]
     list.append(header, cmd.params)
     header
 
-@tier(embedded)
+// The wire form of `evt`: the event code (1 octet), the parameter length (1 octet) and the parameters.
+//
+// The H4 type byte is not added.  The parameters must not exceed 255 octets.
+pub @tier(embedded)
 fn encode_hci_evt_msg(evt: HciEvtMsg) -> [u8]
     var header: [u8] = [evt.event_code as u8, list.len(evt.params) as u8]
     list.append(header, evt.params)
     header
 
-@tier(embedded)
+// The command held in `bytes`, an HCI Command packet without its H4 type byte.
+//
+// `bytes` must hold at least the 3-octet header; the parameters are everything after it.  The length octet is not checked
+// against the number of octets present.
+pub @tier(embedded)
 fn decode_hci_cmd_msg(bytes: [u8]) -> HciCmdMsg
-    let opcode = (bytes[0] as Int) | ((bytes[1] as Int) << 8)
+    let opcode = bytes[0] as Int | (bytes[1] as Int << 8)
     HciCmdMsg { opcode: opcode, params: list.drop(bytes, 3) }
 
-@tier(embedded)
+// The event held in `bytes`, an HCI Event packet without its H4 type byte.
+//
+// `bytes` must hold at least the 2-octet header; the parameters are everything after it.  The length octet is not checked
+// against the number of octets present.
+pub @tier(embedded)
 fn decode_hci_evt_msg(bytes: [u8]) -> HciEvtMsg
     HciEvtMsg { event_code: bytes[0] as Int, params: list.drop(bytes, 2) }
-
-// ── Tests ────────────────────────────────────────────────────────────
-
-@test
-@satisfies("REQ-BLE-HCI-001")
-fn test_opcode_pack_roundtrip_hci_reset()
-    // HCI_Reset: OGF=0x03 (Controller_Baseband), OCF=0x0003.
-    // Wire opcode = 0x0C03.
-    let op = pack_opcode(OGF_CONTROLLER_BASEBAND, 0x0003)
-    test.assert_eq(op, 0x0C03)
-    test.assert_eq(opcode_ogf(op), 0x03)
-    test.assert_eq(opcode_ocf(op), 0x0003)
-
-@test
-@satisfies("REQ-BLE-HCI-001")
-fn test_opcode_pack_le_commands()
-    // LE_Set_Advertising_Enable: OGF=0x08, OCF=0x000A → 0x200A.
-    let op_en = pack_opcode(OGF_LE_CONTROLLER, 0x000A)
-    test.assert_eq(op_en, 0x200A)
-
-    // LE_Set_Advertising_Parameters: OGF=0x08, OCF=0x0006 → 0x2006.
-    let op_params = pack_opcode(OGF_LE_CONTROLLER, 0x0006)
-    test.assert_eq(op_params, 0x2006)
-
-    // LE_Read_Buffer_Size: OGF=0x08, OCF=0x0002 → 0x2002.
-    let op_buf = pack_opcode(OGF_LE_CONTROLLER, 0x0002)
-    test.assert_eq(op_buf, 0x2002)
-
-@test
-fn test_opcode_masks_out_of_range_bits()
-    // OGF is 6 bits; any higher bits must drop.
-    let op = pack_opcode(0x40, 0x0001)   // OGF=64 overflows into 6 bits → 0
-    test.assert_eq(opcode_ogf(op), 0)
-
-    // OCF is 10 bits; top bits drop too.
-    let op2 = pack_opcode(0x08, 0x400)   // 0x400 = 1024, overflows 10 bits → 0
-    test.assert_eq(opcode_ocf(op2), 0)
-
-@test
-@satisfies("REQ-BLE-HCI-001")
-fn test_hci_cmd_header_round_trip()
-    let h = HciCmdHeader { opcode: 0x0C03, length: 0 }
-    test.assert_eq(h.opcode as Int, 0x0C03)
-    test.assert_eq(h.length as Int, 0)
-
-@test
-@satisfies("REQ-BLE-HCI-002")
-fn test_hci_evt_header_round_trip()
-    // Command_Complete event: code 0x0E.
-    let h = HciEvtHeader { code: 0x0E, length: 4 }
-    test.assert_eq(h.code as Int, 0x0E)
-    test.assert_eq(h.length as Int, 4)
-
-@test
-fn test_hci_acl_header_fields()
-    let h = HciAclHeader { handle_flags: 0x2001, length: 10 }
-    // handle=0x001, pb=0b10 (start-flushable), bc=0b00.
-    test.assert_eq(h.length as Int, 10)
-    test.assert_eq(acl_handle(h.handle_flags as Int), 1)
-    test.assert_eq(acl_pb_flag(h.handle_flags as Int), 2)
-    test.assert_eq(acl_bc_flag(h.handle_flags as Int), 0)
-
-@test
-@satisfies("REQ-BLE-L2CAP-018")
-fn test_acl_handle_flags_pack()
-    // Handle 0x005, PB=Start-flushable (2), BC=0 (LE-only).
-    let hf = pack_acl_handle_flags(0x005, PB_FLAG_START_FLUSHABLE, 0)
-    test.assert_eq(hf, 0x2005)
-    test.assert_eq(acl_handle(hf), 0x005)
-    test.assert_eq(acl_pb_flag(hf), PB_FLAG_START_FLUSHABLE)
-    test.assert_eq(acl_bc_flag(hf), 0)
-
-@test
-fn test_acl_handle_flags_continuation()
-    let hf = pack_acl_handle_flags(0x005, PB_FLAG_CONTINUATION, 0)
-    // PB=0b01 in bits 12-13 → 0x1000 + handle 0x005.
-    test.assert_eq(hf, 0x1005)
-    test.assert_eq(acl_pb_flag(hf), 1)
-
-@test
-fn test_h4_packet_type_constants()
-    // Spec-literal values per Vol 4 Part A §2.
-    test.assert_eq(H4_PKT_COMMAND, 0x01)
-    test.assert_eq(H4_PKT_ACL, 0x02)
-    test.assert_eq(H4_PKT_SCO, 0x03)
-    test.assert_eq(H4_PKT_EVENT, 0x04)
-    test.assert_eq(H4_PKT_ISO, 0x05)
-
-@test
-fn test_ogf_constants_match_spec_table()
-    test.assert_eq(OGF_LINK_CONTROL, 0x01)
-    test.assert_eq(OGF_CONTROLLER_BASEBAND, 0x03)
-    test.assert_eq(OGF_INFORMATIONAL_PARAMETERS, 0x04)
-    test.assert_eq(OGF_STATUS_PARAMETERS, 0x05)
-    test.assert_eq(OGF_LE_CONTROLLER, 0x08)
-    test.assert_eq(OGF_VENDOR_SPECIFIC, 0x3F)
-
-@test
-fn test_event_code_constants_match_spec_table()
-    test.assert_eq(EVT_DISCONNECTION_COMPLETE, 0x05)
-    test.assert_eq(EVT_ENCRYPTION_CHANGE, 0x08)
-    test.assert_eq(EVT_COMMAND_COMPLETE, 0x0E)
-    test.assert_eq(EVT_COMMAND_STATUS, 0x0F)
-    test.assert_eq(EVT_HARDWARE_ERROR, 0x10)
-    test.assert_eq(EVT_NUMBER_OF_COMPLETED_PACKETS, 0x13)
-    test.assert_eq(EVT_LE_META_EVENT, 0x3E)

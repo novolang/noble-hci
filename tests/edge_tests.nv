@@ -10,7 +10,6 @@ use std.test
 use hci_h4
 use hci_frame
 use hci_codec
-use hci_commands
 use bd_addr
 use uuid
 

@@ -1,0 +1,74 @@
+// tests/bd_addr_tests.nv — the unit tests of src/bd_addr.nv.
+//
+//   novo test tests/bd_addr_tests.nv
+
+use std.test
+use bd_addr.{ addr_top2, classify_random, format_bd_addr, hex_byte }
+
+@test
+@satisfies("REQ-BLE-LL-062")
+fn test_classify_static_random()
+    // 0xC0 = 0b11000000 → top-2 = 0b11 → StaticRandom.
+    let b: [u8] = [0x01, 0x02, 0x03, 0x04, 0x05, 0xC0]
+    match classify_random(b)
+        StaticRandom => test.assert_eq(1, 1)
+        _            => test.assert_eq(0, 1)
+
+@test
+@satisfies("REQ-BLE-PRIV-005")
+fn test_classify_rpa()
+    // 0x70 = 0b01110000 → top-2 = 0b01 → Resolvable.  0x70 is the
+    // most significant octet of the Core Spec §D.4 worked example's
+    // prand (0x708194), so this is the spec's own RPA, not a
+    // hand-picked byte.
+    let b: [u8] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x70]
+    match classify_random(b)
+        Resolvable => test.assert_eq(1, 1)
+        _          => test.assert_eq(0, 1)
+
+@test
+@satisfies("REQ-BLE-PRIV-005")
+fn test_reserved_subtype_is_not_classified_resolvable()
+    // 0b10 is Reserved for Future Use.  This module classified it
+    // as Resolvable until M8's prep, which is the transposition
+    // that broke resolution — keep a test on the pattern that used
+    // to be wrong so it cannot quietly come back.
+    let b: [u8] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x80]
+    match classify_random(b)
+        Resolvable => test.assert_eq(0, 1)
+        _          => test.assert_eq(1, 1)
+
+@test
+@satisfies("REQ-BLE-PRIV-004")
+fn test_classify_nrpa()
+    // 0x00 top-2 = 0b00 → NonResolvable.
+    let b: [u8] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x00]
+    match classify_random(b)
+        NonResolvable => test.assert_eq(1, 1)
+        _             => test.assert_eq(0, 1)
+
+@test
+fn test_hex_byte_roundtrip()
+    test.assert_eq(hex_byte(0), "00")
+    test.assert_eq(hex_byte(15), "0F")
+    test.assert_eq(hex_byte(255), "FF")
+    test.assert_eq(hex_byte(0xAB), "AB")
+
+@test
+fn test_format_bd_addr()
+    let b: [u8] = [0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x23]
+    test.assert_eq(format_bd_addr(b), "DE:AD:BE:EF:01:23")
+
+@test
+@satisfies("REQ-BLE-LL-064")
+fn test_top2_extraction_covers_all_four_patterns()
+    let pub_like: [u8] = [0, 0, 0, 0, 0, 0x00]
+    let nrpa_like: [u8] = [0, 0, 0, 0, 0, 0x3F]
+    let rpa_like: [u8] = [0, 0, 0, 0, 0, 0x60]
+    let rfu_like: [u8] = [0, 0, 0, 0, 0, 0xA0]
+    let stat_like: [u8] = [0, 0, 0, 0, 0, 0xFF]
+    test.assert_eq(addr_top2(pub_like), 0)
+    test.assert_eq(addr_top2(nrpa_like), 0)
+    test.assert_eq(addr_top2(rpa_like), 1)
+    test.assert_eq(addr_top2(rfu_like), 2)
+    test.assert_eq(addr_top2(stat_like), 3)

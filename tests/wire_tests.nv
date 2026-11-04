@@ -1,0 +1,124 @@
+// tests/wire_tests.nv — wire bytes and opcode values that the per-module suites do not pin.
+//
+// Each case compares a builder or an opcode with the value the Core Specification gives it: the opcode as OGF
+// and OCF in [Vol 4] Part E, Section 7, the packet as its header and parameters in Section 5.4.
+//
+//   novo test tests/wire_tests.nv
+
+use std.test
+use bd_addr
+use hci_codec
+use hci_commands
+
+@test
+fn test_static_random_tags_the_address_static_random()
+    let a = bd_addr.static_random([0x11, 0x22, 0x33, 0x44, 0x55, 0xC6])
+    test.assert_eq(bd_addr.classify_random(a.bytes) == bd_addr.StaticRandom, true)
+    test.assert_eq(a.kind == bd_addr.StaticRandom, true)
+    test.assert_eq(list.len(a.bytes), 6)
+    test.assert_eq(a.bytes[5] as Int, 0xC6)
+
+@test
+fn test_parameterless_le_commands_are_four_octets()
+    test.assert_eq(hci_codec.cmd_le_read_buffer_size(), [0x01, 0x02, 0x20, 0x00])
+    test.assert_eq(hci_codec.cmd_le_read_local_supported_features(), [0x01, 0x03, 0x20, 0x00])
+
+@test
+fn test_advertising_data_commands_carry_the_given_block()
+    var block: [u8] = [0x03, 0x02, 0x01, 0x06]
+    for _ in 0..28
+        list.push(block, 0x00)
+    let adv = hci_codec.cmd_le_set_advertising_data(block)
+    test.assert_eq(list.len(adv), 4 + 32)
+    test.assert_eq(adv[0] as Int, 0x01)
+    test.assert_eq(adv[1] as Int, 0x08)
+    test.assert_eq(adv[2] as Int, 0x20)
+    test.assert_eq(adv[3] as Int, 32)
+    test.assert_eq(adv[5] as Int, 0x02)
+    let rsp = hci_codec.cmd_le_set_scan_response_data(block)
+    test.assert_eq(list.len(rsp), 4 + 32)
+    test.assert_eq(rsp[1] as Int, 0x09)
+    test.assert_eq(rsp[2] as Int, 0x20)
+    test.assert_eq(rsp[3] as Int, 32)
+
+@test
+fn test_iso_handle_list_masks_each_handle_to_twelve_bits()
+    let evt: [u8] = [0xAA, 0x40, 0xF0, 0xFF, 0x1F, 0x01, 0x00]
+    test.assert_eq(hci_codec.iso_handle_list(evt, 1, 3), [0x0040, 0x0FFF, 0x0001])
+    test.assert_eq(hci_codec.iso_handle_list(evt, 1, 0), [])
+
+@test
+fn test_only_the_first_fragment_and_the_complete_sdu_carry_the_sdu_header()
+    test.assert_eq(hci_codec.iso_pb_has_sdu_header(hci_codec.ISO_PB_FIRST_FRAGMENT), true)
+    test.assert_eq(hci_codec.iso_pb_has_sdu_header(hci_codec.ISO_PB_COMPLETE_SDU), true)
+    test.assert_eq(hci_codec.iso_pb_has_sdu_header(hci_codec.ISO_PB_INTERMEDIATE_FRAGMENT), false)
+    test.assert_eq(hci_codec.iso_pb_has_sdu_header(hci_codec.ISO_PB_LAST_FRAGMENT), false)
+
+@test
+fn test_informational_parameters_opcodes()
+    test.assert_eq(hci_commands.opcode_read_local_supported_commands(), 0x1002)
+    test.assert_eq(hci_commands.opcode_read_local_supported_features(), 0x1003)
+    test.assert_eq(hci_commands.opcode_read_buffer_size(), 0x1005)
+
+@test
+fn test_le_controller_opcodes()
+    test.assert_eq(hci_commands.opcode_le_set_event_mask(), 0x2001)
+    test.assert_eq(hci_commands.opcode_le_read_local_supported_features(), 0x2003)
+    test.assert_eq(hci_commands.opcode_le_create_connection(), 0x200D)
+    test.assert_eq(hci_commands.opcode_le_create_connection_cancel(), 0x200E)
+    test.assert_eq(hci_commands.opcode_le_extended_create_connection(), 0x2043)
+    test.assert_eq(hci_commands.opcode_le_read_supported_states(), 0x201C)
+    test.assert_eq(hci_commands.opcode_le_read_default_data_length(), 0x2023)
+    test.assert_eq(hci_commands.opcode_le_read_resolving_list_size(), 0x202A)
+    test.assert_eq(hci_commands.opcode_le_read_max_data_length(), 0x202F)
+
+@test
+fn test_filter_accept_list_opcodes_and_their_earlier_names_agree()
+    test.assert_eq(hci_commands.opcode_le_read_white_list_size(), 0x200F)
+    test.assert_eq(hci_commands.opcode_le_clear_white_list(), 0x2010)
+    test.assert_eq(hci_commands.opcode_le_clear_filter_accept_list(), 0x2010)
+    test.assert_eq(hci_commands.opcode_le_add_device_to_filter_accept_list(), 0x2011)
+
+@test
+fn test_add_device_to_filter_accept_list_parameters()
+    let p = hci_commands.build_le_add_device_to_filter_accept_list(0x01, [0x11, 0x22, 0x33, 0x44, 0x55, 0x66])
+    test.assert_eq(p, [0x01, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66])
+
+@test
+fn test_create_connection_parameters_follow_the_command_layout()
+    let peer: [u8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66]
+    let p = hci_commands.build_le_create_connection(0x0060, 0x0030, 0x00, 0x01, peer, 0x00, 0x0018, 0x0028, 0x0004, 0x00C8, 0x0010, 0x0020)
+    test.assert_eq(list.len(p), 25)
+    test.assert_eq(p[0] as Int, 0x60)
+    test.assert_eq(p[2] as Int, 0x30)
+    test.assert_eq(p[4] as Int, 0x00)
+    test.assert_eq(p[5] as Int, 0x01)
+    test.assert_eq(p[6] as Int, 0x11)
+    test.assert_eq(p[11] as Int, 0x66)
+    test.assert_eq(p[12] as Int, 0x00)
+    test.assert_eq(p[13] as Int, 0x18)
+    test.assert_eq(p[15] as Int, 0x28)
+    test.assert_eq(p[17] as Int, 0x04)
+    test.assert_eq(p[19] as Int, 0xC8)
+    test.assert_eq(p[21] as Int, 0x10)
+    test.assert_eq(p[23] as Int, 0x20)
+
+@test
+fn test_extended_create_connection_parameters_follow_the_command_layout()
+    let peer: [u8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66]
+    let p = hci_commands.build_le_extended_create_connection(0x0060, 0x0030, 0x00, 0x01, peer, 0x00, 0x0018, 0x0028, 0x0004, 0x00C8, 0x0010, 0x0020)
+    test.assert_eq(list.len(p), 26)
+    test.assert_eq(p[0] as Int, 0x00)
+    test.assert_eq(p[1] as Int, 0x00)
+    test.assert_eq(p[2] as Int, 0x01)
+    test.assert_eq(p[3] as Int, 0x11)
+    test.assert_eq(p[8] as Int, 0x66)
+    test.assert_eq(p[9] as Int, 0x01)
+    test.assert_eq(p[10] as Int, 0x60)
+    test.assert_eq(p[12] as Int, 0x30)
+    test.assert_eq(p[14] as Int, 0x18)
+    test.assert_eq(p[16] as Int, 0x28)
+    test.assert_eq(p[18] as Int, 0x04)
+    test.assert_eq(p[20] as Int, 0xC8)
+    test.assert_eq(p[22] as Int, 0x10)
+    test.assert_eq(p[24] as Int, 0x20)

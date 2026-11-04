@@ -1,0 +1,145 @@
+// tests/hci_h4_tests.nv — the unit tests of src/hci_h4.nv.
+//
+//   novo test tests/hci_h4_tests.nv
+
+use std.test
+use hci_h4.{ PKT_ACL, PKT_COMMAND, PKT_EVENT, PKT_ISO, PKT_SCO, frame_h4, h4_packet_length }
+
+@test
+fn test_packet_type_constants()
+    test.assert_eq(PKT_COMMAND, 0x01)
+    test.assert_eq(PKT_ACL, 0x02)
+    test.assert_eq(PKT_SCO, 0x03)
+    test.assert_eq(PKT_EVENT, 0x04)
+    test.assert_eq(PKT_ISO, 0x05)
+
+@test
+@satisfies("REQ-BLE-H4-001")
+fn test_frame_h4_prepends_type_byte()
+    // HCI_Reset bytes: opcode 0x0C03 (LE 03 0C) + length 0.
+    let hci: [u8] = [0x03, 0x0C, 0x00]
+    let framed = frame_h4(PKT_COMMAND, hci)
+    test.assert_eq(list.len(framed), 4)
+    test.assert_eq(framed[0] as Int, 0x01)
+    test.assert_eq(framed[1] as Int, 0x03)
+    test.assert_eq(framed[2] as Int, 0x0C)
+    test.assert_eq(framed[3] as Int, 0x00)
+
+@test
+@satisfies("REQ-BLE-H4-001")
+fn test_frame_h4_event_prefix()
+    let evt: [u8] = [0x0E, 0x04, 0x01, 0x03, 0x0C, 0x00]
+    let framed = frame_h4(PKT_EVENT, evt)
+    test.assert_eq(framed[0] as Int, 0x04)
+    test.assert_eq(list.len(framed), 7)
+
+@test
+@satisfies("REQ-BLE-H4-004")
+fn test_h4_length_command()
+    // 0x01 CMD | 0x03 0x0C | 0x00 (no params) → 4 bytes total.
+    let buf: [u8] = [0x01, 0x03, 0x0C, 0x00]
+    test.assert_eq(h4_packet_length(buf), 4)
+
+    // With 3 bytes of params.
+    let buf2: [u8] = [0x01, 0xAA, 0xBB, 0x03, 0xDE, 0xAD, 0xBE]
+    test.assert_eq(h4_packet_length(buf2), 7)
+
+@test
+@satisfies("REQ-BLE-H4-004")
+fn test_h4_length_event()
+    // 0x04 EVT | 0x0E | 0x04 | 4 bytes of params → 7 bytes total.
+    let buf: [u8] = [0x04, 0x0E, 0x04, 0x01, 0x03, 0x0C, 0x00]
+    test.assert_eq(h4_packet_length(buf), 7)
+
+    // Zero-param event (type + code + len=0) = 3 bytes.
+    let buf2: [u8] = [0x04, 0x10, 0x00]
+    test.assert_eq(h4_packet_length(buf2), 3)
+
+@test
+@satisfies("REQ-BLE-H4-004")
+fn test_h4_length_acl_with_16bit_length()
+    // 0x02 ACL | handle_flags (2 bytes LE) | length (2 bytes LE) | data
+    // Length 0x0005 = 5 bytes of data → 10 bytes total including headers.
+    let buf: [u8] = [0x02, 0x01, 0x20, 0x05, 0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE]
+    test.assert_eq(h4_packet_length(buf), 10)
+
+@test
+fn test_h4_length_acl_big_16bit_length()
+    // ACL payload length 0x0100 = 256 bytes.  Checks the
+    // 16-bit LE decoding picks up the high byte.
+    var buf: [u8] = [0x02, 0x01, 0x20, 0x00, 0x01]
+    test.assert_eq(h4_packet_length(buf), 5 + 256)
+
+@test
+fn test_h4_length_need_more_on_short_buffer()
+    // Empty — clearly need more.
+    test.assert_eq(h4_packet_length([]), -1)
+
+    // Command type byte only, no header yet.
+    let b1: [u8] = [0x01]
+    test.assert_eq(h4_packet_length(b1), -1)
+
+    // Command with 3 bytes — still need-more because need 4 to read length.
+    let b2: [u8] = [0x01, 0x03, 0x0C]
+    test.assert_eq(h4_packet_length(b2), -1)
+
+    // ACL with 4 bytes — still need-more because length is 2 bytes at offset 3-4.
+    let b3: [u8] = [0x02, 0x01, 0x20, 0x05]
+    test.assert_eq(h4_packet_length(b3), -1)
+
+@test
+@satisfies("REQ-BLE-H4-006")
+fn test_h4_length_sco_and_junk_rejected()
+    // SCO (0x03) not used by LE.
+    let sco: [u8] = [0x03, 0x00, 0x00, 0x00]
+    test.assert_eq(h4_packet_length(sco), -2)
+
+    // Garbage byte.
+    let junk: [u8] = [0xFF, 0x00, 0x00]
+    test.assert_eq(h4_packet_length(junk), -2)
+
+@test
+fn test_h4_length_back_to_back_packets()
+    // Two back-to-back packets in one buffer.  Caller computes
+    // the second packet's offset from the first's length.
+    let stream: [u8] = [
+        0x01, 0x03, 0x0C, 0x00,   // Command (4 bytes)
+        0x04, 0x0E, 0x04, 0x01, 0x03, 0x0C, 0x00]   // Event (7 bytes)
+    let first_len = h4_packet_length(stream)
+    test.assert_eq(first_len, 4)
+
+    // Inspect the second packet in place by indexing past the
+    // first.  No list.take/drop needed.
+    test.assert_eq(stream[first_len] as Int, 0x04)   // Event type byte
+    // The event's length byte at offset first_len + 2 is 0x04.
+    test.assert_eq(stream[first_len + 2] as Int, 0x04)
+
+@test
+@satisfies("REQ-BLE-H4-004")
+fn test_h4_length_iso_with_14bit_length()
+    // ISO: type, Connection_Handle/PB/TS (2), Data_Total_Length (2).
+    let small: [u8] = [0x05, 0x40, 0x20, 0x08, 0x00]
+    test.assert_eq(h4_packet_length(small), 5 + 8)
+
+    // The length is 14 bits: 0x0123 in the low 14 bits, and the two
+    // reserved bits above them are not part of it.
+    let big: [u8] = [0x05, 0x40, 0x20, 0x23, 0x01]
+    test.assert_eq(h4_packet_length(big), 5 + 0x0123)
+    let masked: [u8] = [0x05, 0x40, 0x20, 0xFF, 0xFF]
+    test.assert_eq(h4_packet_length(masked), 5 + 0x3FFF)
+
+@test
+@satisfies("REQ-BLE-H4-004")
+fn test_h4_length_iso_need_more_on_short_buffer()
+    test.assert_eq(h4_packet_length([0x05]), -1)
+    // Four octets: the length field is not complete.
+    let b4: [u8] = [0x05, 0x40, 0x20, 0x08]
+    test.assert_eq(h4_packet_length(b4), -1)
+
+@test
+@satisfies("REQ-BLE-H4-004")
+fn test_frame_h4_iso_prefix()
+    let framed = frame_h4(PKT_ISO, [0x40, 0x20, 0x02, 0x00, 0xAA, 0xBB])
+    test.assert_eq(list.len(framed), 7)
+    test.assert_eq(framed[0] as Int, 0x05)
+    test.assert_eq(h4_packet_length(framed), 7)

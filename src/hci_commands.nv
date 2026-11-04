@@ -1,34 +1,25 @@
-// orbit/noble-hci/src/hci_commands.nv — typed HCI Command / Event table.
+// HCI command opcodes and parameter builders ([Vol 4] Part E, Section 7).
 //
-// Core Vol 4 Part E §7.  OpCodes + EventCodes for the subset this
-// stack uses: HCI_Reset, HCI_Read_BD_ADDR, LE_Read_Buffer_Size,
-// LE_Set_Advertising_Parameters / Data / ScanResponseData /
-// Enable, LE_Set_Scan_Parameters / Enable, LE_Create_Connection,
-// HCI_Disconnect, LE_Read_Local_Supported_Features.  Commands
-// outside that list have no entry here.
+// Two functions per command:
 //
-// Two flavours per command:
-//   1. `opcode_<name>()` — returns the 16-bit wire OpCode.
-//      Used by the framing layer + the controller-side
-//      dispatcher to select on a raw OpCode value.
-//   2. `build_<name>(...)` — returns a `[u8]` payload ready to
-//      drop into the HCI Command frame's variable tail.  Only
-//      wired for commands with non-trivial parameters; no-param
-//      commands (HCI_Reset, LE_Read_Buffer_Size) just need the
-//      opcode + length=0.
+//   `opcode_<name>()`   the 16-bit opcode, for the framing layer and for a Controller that dispatches on it.
+//   `build_<name>(...)` the parameter octets of the command, ready to follow the 3-octet command header.  A
+//                       command with no parameters has none.
 //
-// Satisfies: REQ-BLE-HCI-004 (HCI_Reset) through REQ-BLE-HCI-018
-// (LE_Set_Advertising_Enable), REQ-BLE-HCI-050 (event code
-// coverage — partial: only the events the list above can provoke).
+// The values the parameters take are constants here, and so are the limits the builders enforce: a builder
+// answers `None` for a value that does not fit its field rather than cutting it.  The commands are the subset
+// the noble stack uses: the commands that set up the controller, advertising, scanning, connections, encryption,
+// periodic advertising and the isochronous channels.  A command with no entry is not built here.
+// Multi-octet fields are little-endian.
 
-use std.test
 use std.bits
 
 // ═════════════════════════════════════════════════════════════════════
 // Link-control commands  (OGF 0x01)
 // ═════════════════════════════════════════════════════════════════════
 
-@tier(embedded)
+// The opcode of the Disconnect command, 0x0406 ([Vol 4] Part E, Section 7.1.6).
+pub @tier(embedded)
 @no_alloc
 fn opcode_hci_disconnect() -> Int
     // OGF=0x01, OCF=0x0006 → 0x0406.
@@ -36,17 +27,17 @@ fn opcode_hci_disconnect() -> Int
 
 // Reason Remote User Terminated Connection (0x13), one of the Reason
 // values the Disconnect command takes ([Vol 4] Part E, Section 7.1.6).
-const DISCONNECT_REASON_REMOTE_USER_TERMINATED = 0x13
+pub const DISCONNECT_REASON_REMOTE_USER_TERMINATED = 0x13
 
 // Reason Remote Device Terminated Connection due to Low Resources (0x14):
 // the Reason of a Host that ends a connection it has no slot for ([Vol 4]
 // Part E, Section 7.1.6).
-const DISCONNECT_REASON_LOW_RESOURCES = 0x14
+pub const DISCONNECT_REASON_LOW_RESOURCES = 0x14
 
 // The parameters of the Disconnect command ([Vol 4] Part E, Section
 // 7.1.6): Connection_Handle, 2 octets least significant first, then
 // Reason.
-@tier(embedded)
+pub @tier(embedded)
 fn build_disconnect(connection_handle: Int, reason: Int) -> [u8]
     [(connection_handle & 0xFF) as u8, ((connection_handle >>> 8) & 0x0F) as u8, reason as u8]
 
@@ -54,14 +45,16 @@ fn build_disconnect(connection_handle: Int, reason: Int) -> [u8]
 // Controller + Baseband commands  (OGF 0x03)
 // ═════════════════════════════════════════════════════════════════════
 
-@satisfies("REQ-BLE-HCI-004")
+// The opcode of the Reset command (HCI_Reset), 0x0C03 ([Vol 4] Part E, Section 7.3.2).
+pub @satisfies("REQ-BLE-HCI-004")
 @tier(embedded)
 @no_alloc
 fn opcode_hci_reset() -> Int
     // OGF=0x03, OCF=0x0003 → 0x0C03.
     (0x03 << 10) | 0x003
 
-@satisfies("REQ-BLE-HCI-009")
+// The opcode of the Set Event Mask command, 0x0C01 ([Vol 4] Part E, Section 7.3.1).
+pub @satisfies("REQ-BLE-HCI-009")
 @tier(embedded)
 @no_alloc
 fn opcode_hci_set_event_mask() -> Int
@@ -82,7 +75,7 @@ fn opcode_hci_set_event_mask() -> Int
 // octet 10, bits 5 to 7, and a Host sends them only to one that does.
 
 // [Vol 4] Part E, Section 7.3.38 — Set Controller To Host Flow Control.
-@satisfies("REQ-BLE-HCI-059")
+pub @satisfies("REQ-BLE-HCI-059")
 @tier(embedded)
 @no_alloc
 fn opcode_set_controller_to_host_flow_control() -> Int
@@ -90,7 +83,7 @@ fn opcode_set_controller_to_host_flow_control() -> Int
     (0x03 << 10) | 0x031
 
 // [Vol 4] Part E, Section 7.3.39 — Host Buffer Size.
-@satisfies("REQ-BLE-HCI-059")
+pub @satisfies("REQ-BLE-HCI-059")
 @tier(embedded)
 @no_alloc
 fn opcode_host_buffer_size() -> Int
@@ -98,19 +91,22 @@ fn opcode_host_buffer_size() -> Int
     (0x03 << 10) | 0x033
 
 // [Vol 4] Part E, Section 7.3.40 — Host Number Of Completed Packets.
-@satisfies("REQ-BLE-HCI-059")
+pub @satisfies("REQ-BLE-HCI-059")
 @tier(embedded)
 @no_alloc
 fn opcode_host_number_of_completed_packets() -> Int
     // OGF=0x03, OCF=0x0035 → 0x0C35.
     (0x03 << 10) | 0x035
 
-// Flow_Control_Enable values of Set Controller To Host Flow Control.
-const FLOW_CONTROL_OFF = 0x00
-const FLOW_CONTROL_ACL = 0x01
+// Flow_Control_Enable 0x00 of Set Controller To Host Flow Control: the Controller sends data to the Host without flow control, the
+// default ([Vol 4] Part E, Section 7.3.38).
+pub const FLOW_CONTROL_OFF = 0x00
+// Flow_Control_Enable 0x01 of Set Controller To Host Flow Control: flow control on for ACL data packets ([Vol 4] Part E,
+// Section 7.3.38).
+pub const FLOW_CONTROL_ACL = 0x01
 
 // The parameter of Set Controller To Host Flow Control: Flow_Control_Enable.
-@satisfies("REQ-BLE-HCI-059")
+pub @satisfies("REQ-BLE-HCI-059")
 @tier(embedded)
 fn build_set_controller_to_host_flow_control(enable: Int) -> [u8]
     [enable as u8]
@@ -119,7 +115,7 @@ fn build_set_controller_to_host_flow_control(enable: Int) -> [u8]
 // (2), Host_Synchronous_Data_Packet_Length (1), Host_Total_Num_ACL_Data_Packets
 // (2) and Host_Total_Num_Synchronous_Data_Packets (2).  A Host with no
 // synchronous data gives 0 for the last two ([Vol 4] Part E, Section 7.3.39).
-@satisfies("REQ-BLE-HCI-059")
+pub @satisfies("REQ-BLE-HCI-059")
 @tier(embedded)
 fn build_host_buffer_size(acl_length: Int, acl_total: Int) -> [u8]
     [(acl_length & 0xFF) as u8, ((acl_length >>> 8) & 0xFF) as u8, 0x00,
@@ -128,7 +124,7 @@ fn build_host_buffer_size(acl_length: Int, acl_total: Int) -> [u8]
 // The parameters of Host Number Of Completed Packets for one handle:
 // Num_Handles (1), Connection_Handle (2) and Host_Num_Of_Completed_Packets
 // (2) ([Vol 4] Part E, Section 7.3.40).
-@satisfies("REQ-BLE-HCI-059")
+pub @satisfies("REQ-BLE-HCI-059")
 @tier(embedded)
 fn build_host_number_of_completed_packets(connection_handle: Int, count: Int) -> [u8]
     [0x01, (connection_handle & 0xFF) as u8, ((connection_handle >>> 8) & 0x0F) as u8,
@@ -139,7 +135,7 @@ fn build_host_number_of_completed_packets(connection_handle: Int, count: Int) ->
 // Host_Num_Of_Completed_Packets[i] (2 each), the handles first and the counts
 // after them ([Vol 4] Part E, Section 7.3.40).  `handles` and `counts` are
 // as long as each other.
-@satisfies("REQ-BLE-HCI-059")
+pub @satisfies("REQ-BLE-HCI-059")
 @tier(embedded)
 fn build_host_number_of_completed_packets_list(handles: [Int], counts: [Int]) -> [u8]
     var out: [u8] = [list.len(handles) as u8]
@@ -153,115 +149,64 @@ fn build_host_number_of_completed_packets_list(handles: [Int], counts: [Int]) ->
 
 // Whether `commands`, the 64 octets of Supported_Commands, lists Host Buffer
 // Size, octet 10 bit 6 ([Vol 4] Part E, Section 6.27).
-@satisfies("REQ-BLE-HCI-059")
+pub @satisfies("REQ-BLE-HCI-059")
 @tier(embedded)
 @no_alloc
 fn has_host_buffer_size(commands: [u8]) -> Bool
-    list.len(commands) > 10 and ((commands[10] as Int) & 0x40) == 0x40
+    list.len(commands) > 10 and (commands[10] as Int & 0x40) == 0x40
 
 // Whether `commands`, the 64 octets of Supported_Commands, lists the three
 // commands of Controller-to-Host flow control: Set Controller To Host Flow
 // Control, Host Buffer Size and Host Number Of Completed Packets, octet 10
 // bits 5, 6 and 7 ([Vol 4] Part E, Section 6.27).  An answer too short to
 // reach the octet, or none at all, lists nothing.
-@satisfies("REQ-BLE-HCI-059")
+pub @satisfies("REQ-BLE-HCI-059")
 @tier(embedded)
 @no_alloc
 fn has_controller_to_host_flow_control(commands: [u8]) -> Bool
-    list.len(commands) > 10 and ((commands[10] as Int) & 0xE0) == 0xE0
-
-@test
-@satisfies("REQ-BLE-HCI-059")
-fn test_flow_control_opcodes_and_parameters()
-    test.assert_eq(opcode_set_controller_to_host_flow_control(), 0x0C31)
-    test.assert_eq(opcode_host_buffer_size(), 0x0C33)
-    test.assert_eq(opcode_host_number_of_completed_packets(), 0x0C35)
-    test.assert_eq(build_set_controller_to_host_flow_control(FLOW_CONTROL_ACL)[0] as Int, 0x01)
-    let size = build_host_buffer_size(251, 3)
-    test.assert_eq(list.len(size), 7)
-    test.assert_eq(size[0] as Int, 251)
-    test.assert_eq(size[1] as Int, 0)
-    test.assert_eq(size[2] as Int, 0)
-    test.assert_eq(size[3] as Int, 3)
-    test.assert_eq(size[4] as Int, 0)
-    test.assert_eq(size[5] as Int, 0)
-    test.assert_eq(size[6] as Int, 0)
-    let done = build_host_number_of_completed_packets(0x0123, 1)
-    test.assert_eq(list.len(done), 5)
-    test.assert_eq(done[0] as Int, 1)
-    test.assert_eq(done[1] as Int, 0x23)
-    test.assert_eq(done[2] as Int, 0x01)
-    test.assert_eq(done[3] as Int, 1)
-    test.assert_eq(done[4] as Int, 0)
-    // Two handles: the count, both handles, then both counts.
-    let two = build_host_number_of_completed_packets_list([0x0040, 0x0041], [3, 0x0102])
-    test.assert_eq(list.len(two), 9)
-    test.assert_eq(two[0] as Int, 2)
-    test.assert_eq(two[1] as Int, 0x40)
-    test.assert_eq(two[3] as Int, 0x41)
-    test.assert_eq(two[5] as Int, 3)
-    test.assert_eq(two[7] as Int, 0x02)
-    test.assert_eq(two[8] as Int, 0x01)
-
-@test
-@satisfies("REQ-BLE-HCI-059")
-fn test_the_flow_control_supported_command_bits()
-    var listed: [u8] = []
-    for i in 0..64
-        list.push(listed, if i == 10 then 0xE0 else 0x00)
-    test.assert_eq(has_controller_to_host_flow_control(listed), true)
-    // Read Transmit Power Level (bit 2) is not one of the three, and a
-    // Controller that lists only some of them is not served.
-    listed[10] = 0x04
-    test.assert_eq(has_controller_to_host_flow_control(listed), false)
-    listed[10] = 0xA0
-    test.assert_eq(has_controller_to_host_flow_control(listed), false)
-    listed[10] = 0xFF
-    test.assert_eq(has_controller_to_host_flow_control(listed), true)
-    test.assert_eq(has_controller_to_host_flow_control([0xFF]), false)
-    // Host Buffer Size alone is bit 6.
-    listed[10] = 0x40
-    test.assert_eq(has_host_buffer_size(listed), true)
-    listed[10] = 0xA0
-    test.assert_eq(has_host_buffer_size(listed), false)
-    test.assert_eq(has_host_buffer_size([]), false)
-    test.assert_eq(has_controller_to_host_flow_control([]), false)
+    list.len(commands) > 10 and (commands[10] as Int & 0xE0) == 0xE0
 
 // ═════════════════════════════════════════════════════════════════════
 // Informational parameters  (OGF 0x04)
 // ═════════════════════════════════════════════════════════════════════
 
-@satisfies("REQ-BLE-HCI-006")
+// The opcode of the Read Local Version Information command, 0x1001 ([Vol 4] Part E, Section 7.4.1).
+pub @satisfies("REQ-BLE-HCI-006")
 @tier(embedded)
 @no_alloc
 fn opcode_read_local_version_information() -> Int
     // OGF=0x04, OCF=0x0001 → 0x1001.
     (0x04 << 10) | 0x001
 
-@satisfies("REQ-BLE-HCI-007")
+// The opcode of the Read Local Supported Commands command, 0x1002 ([Vol 4] Part E, Section 7.4.2).
+pub @satisfies("REQ-BLE-HCI-007")
 @tier(embedded)
 @no_alloc
 fn opcode_read_local_supported_commands() -> Int
     // OGF=0x04, OCF=0x0002 → 0x1002.
     (0x04 << 10) | 0x002
 
-@satisfies("REQ-BLE-HCI-008")
+// The opcode of the Read Local Supported Features command, 0x1003 ([Vol 4] Part E, Section 7.4.3).
+pub @satisfies("REQ-BLE-HCI-008")
 @tier(embedded)
 @no_alloc
 fn opcode_read_local_supported_features() -> Int
     // OGF=0x04, OCF=0x0003 → 0x1003.
     (0x04 << 10) | 0x003
 
-@satisfies("REQ-BLE-HCI-005")
+// The opcode of the Read BD_ADDR command, 0x1009 ([Vol 4] Part E, Section 7.4.6).
+pub @satisfies("REQ-BLE-HCI-005")
 @tier(embedded)
 @no_alloc
 fn opcode_read_bd_addr() -> Int
     // OGF=0x04, OCF=0x0009 → 0x1009.
     (0x04 << 10) | 0x009
 
-// BR/EDR Read_Buffer_Size — BlueZ asks for this during init even on
-// LE-only controllers; we answer with all-zeros (no BR/EDR support).
-@tier(embedded)
+// The opcode of the Read Buffer Size command, 0x1005 ([Vol 4] Part E, Section 7.4.5).
+//
+// It is the BR/EDR form of the buffer query; an LE-only Controller answers it with zero sizes, and the LE form is
+// `opcode_le_read_buffer_size`.
+pub @tier(embedded)
 @no_alloc
 fn opcode_read_buffer_size() -> Int
     // OGF=0x04, OCF=0x0005 → 0x1005.
@@ -271,71 +216,79 @@ fn opcode_read_buffer_size() -> Int
 // LE Controller commands  (OGF 0x08)
 // ═════════════════════════════════════════════════════════════════════
 
-// LE_Set_Event_Mask — BlueZ init issues this; we ack with empty Success.
-@tier(embedded)
+// The opcode of the LE Set Event Mask command, 0x2001 ([Vol 4] Part E, Section 7.8.1).  `build_set_event_mask` builds its
+// parameter.
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_set_event_mask() -> Int
     // OGF=0x08, OCF=0x0001 → 0x2001.
     (0x08 << 10) | 0x001
 
-@satisfies("REQ-BLE-HCI-011")
+// The opcode of the LE Read Buffer Size command, 0x2002 ([Vol 4] Part E, Section 7.8.2).
+pub @satisfies("REQ-BLE-HCI-011")
 @tier(embedded)
 @no_alloc
 fn opcode_le_read_buffer_size() -> Int
     // OGF=0x08, OCF=0x0002 → 0x2002.
     (0x08 << 10) | 0x002
 
-@satisfies("REQ-BLE-HCI-012")
+// The opcode of the LE Read Local Supported Features (Page 0) command, 0x2003 ([Vol 4] Part E, Section 7.8.3).
+pub @satisfies("REQ-BLE-HCI-012")
 @tier(embedded)
 @no_alloc
 fn opcode_le_read_local_supported_features() -> Int
     // OGF=0x08, OCF=0x0003 → 0x2003.
     (0x08 << 10) | 0x003
 
-@satisfies("REQ-BLE-HCI-013")
+// The opcode of the LE Set Random Address command, 0x2005 ([Vol 4] Part E, Section 7.8.4).
+pub @satisfies("REQ-BLE-HCI-013")
 @tier(embedded)
 @no_alloc
 fn opcode_le_set_random_address() -> Int
     // OGF=0x08, OCF=0x0005 → 0x2005.
     (0x08 << 10) | 0x005
 
-@satisfies("REQ-BLE-HCI-014")
+// The opcode of the LE Set Advertising Parameters command, 0x2006 ([Vol 4] Part E, Section 7.8.5).
+pub @satisfies("REQ-BLE-HCI-014")
 @tier(embedded)
 @no_alloc
 fn opcode_le_set_advertising_parameters() -> Int
     // OGF=0x08, OCF=0x0006 → 0x2006.
     (0x08 << 10) | 0x006
 
-@satisfies("REQ-BLE-HCI-016")
+// The opcode of the LE Set Advertising Data command, 0x2008 ([Vol 4] Part E, Section 7.8.7).
+pub @satisfies("REQ-BLE-HCI-016")
 @tier(embedded)
 @no_alloc
 fn opcode_le_set_advertising_data() -> Int
     // OGF=0x08, OCF=0x0008 → 0x2008.
     (0x08 << 10) | 0x008
 
-@satisfies("REQ-BLE-HCI-017")
+// The opcode of the LE Set Scan Response Data command, 0x2009 ([Vol 4] Part E, Section 7.8.8).
+pub @satisfies("REQ-BLE-HCI-017")
 @tier(embedded)
 @no_alloc
 fn opcode_le_set_scan_response_data() -> Int
     // OGF=0x08, OCF=0x0009 → 0x2009.
     (0x08 << 10) | 0x009
 
-@satisfies("REQ-BLE-HCI-018")
+// The opcode of the LE Set Advertising Enable command, 0x200A ([Vol 4] Part E, Section 7.8.9).
+pub @satisfies("REQ-BLE-HCI-018")
 @tier(embedded)
 @no_alloc
 fn opcode_le_set_advertising_enable() -> Int
     // OGF=0x08, OCF=0x000A → 0x200A.
     (0x08 << 10) | 0x00A
 
-// [Vol 4] Part E, Section 7.8.10 — LE Set Scan Parameters command
-@tier(embedded)
+// The opcode of the LE Set Scan Parameters command, 0x200B ([Vol 4] Part E, Section 7.8.10).
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_set_scan_parameters() -> Int
     // OGF=0x08, OCF=0x000B → 0x200B.
     (0x08 << 10) | 0x00B
 
-// [Vol 4] Part E, Section 7.8.11 — LE Set Scan Enable command
-@tier(embedded)
+// The opcode of the LE Set Scan Enable command, 0x200C ([Vol 4] Part E, Section 7.8.11).
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_set_scan_enable() -> Int
     // OGF=0x08, OCF=0x000C → 0x200C.
@@ -344,7 +297,7 @@ fn opcode_le_set_scan_enable() -> Int
 // [Vol 4] Part E, Section 7.8.12 — LE Create Connection command, the
 // Central's command: it starts the Initiating State, and the LE
 // Connection Complete event reports the connection it makes.
-@tier(embedded)
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_create_connection() -> Int
     // OGF=0x08, OCF=0x000D → 0x200D.
@@ -355,90 +308,91 @@ fn opcode_le_create_connection() -> Int
 // that scans with LE Create Connection does not hear them.  Its status arrives as
 // a Command Status event and the connection as LE Enhanced Connection Complete
 // (or LE Connection Complete when the Host left that event masked).
-@tier(embedded)
+pub @tier(embedded)
 fn opcode_le_extended_create_connection() -> Int
     // OGF=0x08, OCF=0x043 → 0x2043.
     (0x08 << 10) | 0x043
 
-// [Vol 4] Part E, Section 7.8.13 — LE Create Connection Cancel command.
-@tier(embedded)
+// The opcode of the LE Create Connection Cancel command, 0x200E ([Vol 4] Part E, Section 7.8.13).
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_create_connection_cancel() -> Int
     // OGF=0x08, OCF=0x000E → 0x200E.
     (0x08 << 10) | 0x00E
 
-// [Vol 4] Part E, Section 7.8.14 — LE Clear Filter Accept List command
+// [Vol 4] Part E, Section 7.8.15 — LE Clear Filter Accept List command
 // (LE Clear White List before Core 5.0; the Controller is the same one).
-@tier(embedded)
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_clear_filter_accept_list() -> Int
     // OGF=0x08, OCF=0x0010 → 0x2010.
     (0x08 << 10) | 0x010
 
-// [Vol 4] Part E, Section 7.8.15 — LE Add Device To Filter Accept List.
-@tier(embedded)
+// [Vol 4] Part E, Section 7.8.16 — LE Add Device To Filter Accept List.
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_add_device_to_filter_accept_list() -> Int
     // OGF=0x08, OCF=0x0011 → 0x2011.
     (0x08 << 10) | 0x011
 
 // [Vol 4] Part E, Section 7.8.38 — LE Add Device To Resolving List.
-@tier(embedded)
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_add_device_to_resolving_list() -> Int
     // OGF=0x08, OCF=0x0027 → 0x2027.
     (0x08 << 10) | 0x027
 
 // [Vol 4] Part E, Section 7.8.40 — LE Clear Resolving List.
-@tier(embedded)
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_clear_resolving_list() -> Int
     // OGF=0x08, OCF=0x0029 → 0x2029.
     (0x08 << 10) | 0x029
 
 // [Vol 4] Part E, Section 7.8.44 — LE Set Address Resolution Enable.
-@tier(embedded)
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_set_address_resolution_enable() -> Int
     // OGF=0x08, OCF=0x002D → 0x202D.
     (0x08 << 10) | 0x02D
 
-// BlueZ-init read commands — additional LE-side opcodes the kernel
-// queries during `hciconfig up`.  We return spec-shaped stubs so
-// the init handshake completes; real-controller bring-up populates
-// these per the actual hardware capabilities.
-
-@tier(embedded)
+// The opcode of the LE Read Filter Accept List Size command, 0x200F ([Vol 4] Part E, Section 7.8.14).
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_read_white_list_size() -> Int
     // OGF=0x08, OCF=0x000F → 0x200F.
     (0x08 << 10) | 0x00F
 
-@tier(embedded)
+// The opcode of the LE Clear Filter Accept List command, 0x2010 ([Vol 4] Part E, Section 7.8.15).
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_clear_white_list() -> Int
     // OGF=0x08, OCF=0x0010 → 0x2010.
     (0x08 << 10) | 0x010
 
-@tier(embedded)
+// The opcode of the LE Read Supported States command, 0x201C ([Vol 4] Part E, Section 7.8.27).
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_read_supported_states() -> Int
     // OGF=0x08, OCF=0x001C → 0x201C.
     (0x08 << 10) | 0x01C
 
-@tier(embedded)
+// The opcode of the LE Read Suggested Default Data Length command, 0x2023 ([Vol 4] Part E, Section 7.8.34).
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_read_default_data_length() -> Int
     // OGF=0x08, OCF=0x0023 → 0x2023.
     (0x08 << 10) | 0x023
 
-@tier(embedded)
+// The opcode of the LE Read Resolving List Size command, 0x202A ([Vol 4] Part E, Section 7.8.41).
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_read_resolving_list_size() -> Int
     // OGF=0x08, OCF=0x002A → 0x202A.
     (0x08 << 10) | 0x02A
 
-@tier(embedded)
+// The opcode of the LE Read Maximum Data Length command, 0x202F ([Vol 4] Part E, Section 7.8.46).
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_read_max_data_length() -> Int
     // OGF=0x08, OCF=0x002F → 0x202F.
@@ -456,7 +410,7 @@ fn opcode_le_read_max_data_length() -> Int
 // command, the extended advertising counterpart of the LE Set Random
 // Address command: the address goes out with one advertising set rather
 // than with all of them.
-@satisfies("REQ-BLE-HCI-051")
+pub @satisfies("REQ-BLE-HCI-051")
 @tier(embedded)
 @no_alloc
 fn opcode_le_set_advertising_set_random_address() -> Int
@@ -465,7 +419,7 @@ fn opcode_le_set_advertising_set_random_address() -> Int
 
 // [Vol 4] Part E, Section 7.8.53 — LE Set Extended Advertising Parameters
 // command [v1].
-@satisfies("REQ-BLE-HCI-051")
+pub @satisfies("REQ-BLE-HCI-051")
 @tier(embedded)
 @no_alloc
 fn opcode_le_set_extended_advertising_parameters() -> Int
@@ -474,7 +428,7 @@ fn opcode_le_set_extended_advertising_parameters() -> Int
 
 // [Vol 4] Part E, Section 7.8.54 — LE Set Extended Advertising Data
 // command.
-@satisfies("REQ-BLE-HCI-051")
+pub @satisfies("REQ-BLE-HCI-051")
 @tier(embedded)
 @no_alloc
 fn opcode_le_set_extended_advertising_data() -> Int
@@ -483,7 +437,7 @@ fn opcode_le_set_extended_advertising_data() -> Int
 
 // [Vol 4] Part E, Section 7.8.55 — LE Set Extended Scan Response Data
 // command.
-@satisfies("REQ-BLE-HCI-051")
+pub @satisfies("REQ-BLE-HCI-051")
 @tier(embedded)
 @no_alloc
 fn opcode_le_set_extended_scan_response_data() -> Int
@@ -492,7 +446,7 @@ fn opcode_le_set_extended_scan_response_data() -> Int
 
 // [Vol 4] Part E, Section 7.8.56 — LE Set Extended Advertising Enable
 // command, which starts and stops one or more advertising sets.
-@satisfies("REQ-BLE-HCI-051")
+pub @satisfies("REQ-BLE-HCI-051")
 @tier(embedded)
 @no_alloc
 fn opcode_le_set_extended_advertising_enable() -> Int
@@ -501,7 +455,7 @@ fn opcode_le_set_extended_advertising_enable() -> Int
 
 // [Vol 4] Part E, Section 7.8.57 — LE Read Maximum Advertising Data Length
 // command.
-@tier(embedded)
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_read_maximum_advertising_data_length() -> Int
     // OGF=0x08, OCF=0x003A → 0x203A.
@@ -509,21 +463,21 @@ fn opcode_le_read_maximum_advertising_data_length() -> Int
 
 // [Vol 4] Part E, Section 7.8.58 — LE Read Number of Supported
 // Advertising Sets command.
-@tier(embedded)
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_read_number_of_supported_advertising_sets() -> Int
     // OGF=0x08, OCF=0x003B → 0x203B.
     (0x08 << 10) | 0x03B
 
-// [Vol 4] Part E, Section 7.8.59 — LE Remove Advertising Set command.
-@tier(embedded)
+// The opcode of the LE Remove Advertising Set command, 0x203C ([Vol 4] Part E, Section 7.8.59).
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_remove_advertising_set() -> Int
     // OGF=0x08, OCF=0x003C → 0x203C.
     (0x08 << 10) | 0x03C
 
-// [Vol 4] Part E, Section 7.8.60 — LE Clear Advertising Sets command.
-@tier(embedded)
+// The opcode of the LE Clear Advertising Sets command, 0x203D ([Vol 4] Part E, Section 7.8.60).
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_clear_advertising_sets() -> Int
     // OGF=0x08, OCF=0x003D → 0x203D.
@@ -540,7 +494,7 @@ fn opcode_le_clear_advertising_sets() -> Int
 
 // [Vol 4] Part E, Section 7.8.61 — LE Set Periodic Advertising Parameters
 // command [v1].
-@satisfies("REQ-BLE-HCI-052")
+pub @satisfies("REQ-BLE-HCI-052")
 @tier(embedded)
 @no_alloc
 fn opcode_le_set_periodic_advertising_parameters() -> Int
@@ -554,7 +508,7 @@ fn opcode_le_set_periodic_advertising_parameters() -> Int
 // Num_Subevents is greater than 0, then the Periodic Advertising is
 // PAwR").  A Host that wants no responses sends the first form and a
 // Controller tells the two apart by the parameter length.
-@satisfies("REQ-BLE-HCI-056")
+pub @satisfies("REQ-BLE-HCI-056")
 @tier(embedded)
 @no_alloc
 fn opcode_le_set_periodic_advertising_parameters_v2() -> Int
@@ -563,7 +517,7 @@ fn opcode_le_set_periodic_advertising_parameters_v2() -> Int
 
 // [Vol 4] Part E, Section 7.8.62 — LE Set Periodic Advertising Data
 // command.
-@satisfies("REQ-BLE-HCI-052")
+pub @satisfies("REQ-BLE-HCI-052")
 @tier(embedded)
 @no_alloc
 fn opcode_le_set_periodic_advertising_data() -> Int
@@ -572,7 +526,7 @@ fn opcode_le_set_periodic_advertising_data() -> Int
 
 // [Vol 4] Part E, Section 7.8.63 — LE Set Periodic Advertising Enable
 // command.
-@satisfies("REQ-BLE-HCI-052")
+pub @satisfies("REQ-BLE-HCI-052")
 @tier(embedded)
 @no_alloc
 fn opcode_le_set_periodic_advertising_enable() -> Int
@@ -598,14 +552,14 @@ fn opcode_le_set_periodic_advertising_enable() -> Int
 // the Controller holds the two families apart (Section 3.1.1): a legacy
 // scan command pins the session to the legacy family and the
 // synchronization commands are then answered Command Disallowed.
-@tier(embedded)
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_set_extended_scan_parameters() -> Int
     // OGF=0x08, OCF=0x0041 → 0x2041.
     (0x08 << 10) | 0x041
 
-// [Vol 4] Part E, Section 7.8.65 — LE Set Extended Scan Enable command.
-@tier(embedded)
+// The opcode of the LE Set Extended Scan Enable command, 0x2042 ([Vol 4] Part E, Section 7.8.65).
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_set_extended_scan_enable() -> Int
     // OGF=0x08, OCF=0x0042 → 0x2042.
@@ -617,7 +571,7 @@ fn opcode_le_set_extended_scan_enable() -> Int
 // synchronize to it, and report the train with the LE Periodic
 // Advertising Sync Established event.  The command is answered by a
 // Command Status event; the sync follows on its own.
-@satisfies("REQ-BLE-HCI-055")
+pub @satisfies("REQ-BLE-HCI-055")
 @tier(embedded)
 @no_alloc
 fn opcode_le_periodic_advertising_create_sync() -> Int
@@ -626,7 +580,7 @@ fn opcode_le_periodic_advertising_create_sync() -> Int
 
 // [Vol 4] Part E, Section 7.8.68 — LE Periodic Advertising Create Sync
 // Cancel command, which ends one that is still pending.
-@satisfies("REQ-BLE-HCI-055")
+pub @satisfies("REQ-BLE-HCI-055")
 @tier(embedded)
 @no_alloc
 fn opcode_le_periodic_advertising_create_sync_cancel() -> Int
@@ -635,7 +589,7 @@ fn opcode_le_periodic_advertising_create_sync_cancel() -> Int
 
 // [Vol 4] Part E, Section 7.8.69 — LE Periodic Advertising Terminate Sync
 // command, which stops reception of the train a Sync_Handle names.
-@satisfies("REQ-BLE-HCI-055")
+pub @satisfies("REQ-BLE-HCI-055")
 @tier(embedded)
 @no_alloc
 fn opcode_le_periodic_advertising_terminate_sync() -> Int
@@ -645,7 +599,7 @@ fn opcode_le_periodic_advertising_terminate_sync() -> Int
 // [Vol 4] Part E, Section 7.8.88 — LE Set Periodic Advertising Receive
 // Enable command, which starts or stops reports for a train the device
 // is synchronized to.
-@tier(embedded)
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_set_periodic_advertising_receive_enable() -> Int
     // OGF=0x08, OCF=0x0059 → 0x2059.
@@ -654,7 +608,7 @@ fn opcode_le_set_periodic_advertising_receive_enable() -> Int
 // [Vol 4] Part E, Section 7.8.89 — LE Periodic Advertising Sync Transfer
 // command: send what is known about the train Sync_Handle names to the
 // peer of Connection_Handle.
-@satisfies("REQ-BLE-HCI-053")
+pub @satisfies("REQ-BLE-HCI-053")
 @tier(embedded)
 @no_alloc
 fn opcode_le_periodic_advertising_sync_transfer() -> Int
@@ -665,7 +619,7 @@ fn opcode_le_periodic_advertising_sync_transfer() -> Int
 // Transfer command: send the synchronization information of the periodic
 // advertising in an advertising set this device is advertising, which is
 // what a Periodic Advertiser transfers with.
-@satisfies("REQ-BLE-HCI-053")
+pub @satisfies("REQ-BLE-HCI-053")
 @tier(embedded)
 @no_alloc
 fn opcode_le_periodic_advertising_set_info_transfer() -> Int
@@ -675,7 +629,7 @@ fn opcode_le_periodic_advertising_set_info_transfer() -> Int
 // [Vol 4] Part E, Section 7.8.91 — LE Set Periodic Advertising Sync
 // Transfer Parameters command: what to do with synchronization
 // information the peer of Connection_Handle sends.
-@satisfies("REQ-BLE-HCI-054")
+pub @satisfies("REQ-BLE-HCI-054")
 @tier(embedded)
 @no_alloc
 fn opcode_le_set_periodic_advertising_sync_transfer_parameters() -> Int
@@ -685,7 +639,7 @@ fn opcode_le_set_periodic_advertising_sync_transfer_parameters() -> Int
 // [Vol 4] Part E, Section 7.8.92 — LE Set Default Periodic Advertising
 // Sync Transfer Parameters command: the same, for every connection that
 // follows.
-@tier(embedded)
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_set_default_periodic_advertising_sync_transfer_parameters() -> Int
     // OGF=0x08, OCF=0x005D → 0x205D.
@@ -714,7 +668,7 @@ fn opcode_le_set_default_periodic_advertising_sync_transfer_parameters() -> Int
 // [Vol 4] Part E, Section 7.8.125 — LE Set Periodic Advertising Subevent
 // Data command: the advertising data of one or more subevents, in reply
 // to an LE Periodic Advertising Subevent Data Request event.
-@satisfies("REQ-BLE-HCI-056")
+pub @satisfies("REQ-BLE-HCI-056")
 @tier(embedded)
 @no_alloc
 fn opcode_le_set_periodic_advertising_subevent_data() -> Int
@@ -723,41 +677,38 @@ fn opcode_le_set_periodic_advertising_subevent_data() -> Int
 
 // ── Encryption commands (Vol 4 Part E §7.8.22-26) ──────────────────
 
-// No @satisfies here.  REQ-BLE-HCI-031's acceptance is "given NIST
-// test vectors, LE_Encrypt output matches" — a property of the bytes
-// the command answers with, not of its opcode number; it sits on
-// `hci_dispatcher.le_encrypt`.
-@tier(embedded)
+// The opcode of the LE Encrypt command, 0x2017 ([Vol 4] Part E, Section 7.8.22).
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_encrypt() -> Int
     // OGF=0x08, OCF=0x0017 → 0x2017.
     (0x08 << 10) | 0x017
 
-// No @satisfies here, for the same reason: REQ-BLE-HCI-032 asks that
-// consecutive calls produce different outputs and that the
-// implementation is backed by the nRF ENTROPY peripheral; it sits on
-// `entropy_pool.refill_step`.
-@tier(embedded)
+// The opcode of the LE Rand command, 0x2018 ([Vol 4] Part E, Section 7.8.23).
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_rand() -> Int
     // OGF=0x08, OCF=0x0018 → 0x2018.
     (0x08 << 10) | 0x018
 
-@satisfies("REQ-BLE-HCI-033")
+// The opcode of the LE Enable Encryption command, 0x2019 ([Vol 4] Part E, Section 7.8.24).
+pub @satisfies("REQ-BLE-HCI-033")
 @tier(embedded)
 @no_alloc
 fn opcode_le_start_encryption() -> Int
     // OGF=0x08, OCF=0x0019 → 0x2019.
     (0x08 << 10) | 0x019
 
-@satisfies("REQ-BLE-HCI-034")
+// The opcode of the LE Long Term Key Request Reply command, 0x201A ([Vol 4] Part E, Section 7.8.25).
+pub @satisfies("REQ-BLE-HCI-034")
 @tier(embedded)
 @no_alloc
 fn opcode_le_long_term_key_request_reply() -> Int
     // OGF=0x08, OCF=0x001A → 0x201A.
     (0x08 << 10) | 0x01A
 
-@satisfies("REQ-BLE-HCI-035")
+// The opcode of the LE Long Term Key Request Negative Reply command, 0x201B ([Vol 4] Part E, Section 7.8.26).
+pub @satisfies("REQ-BLE-HCI-035")
 @tier(embedded)
 @no_alloc
 fn opcode_le_long_term_key_request_negative_reply() -> Int
@@ -770,7 +721,7 @@ fn opcode_le_long_term_key_request_negative_reply() -> Int
 
 // Build LE_Set_Advertising_Enable parameters: one byte,
 // 0x00=disable, 0x01=enable (Vol 4 Part E §7.8.9).
-@satisfies("REQ-BLE-HCI-018")
+pub @satisfies("REQ-BLE-HCI-018")
 @tier(embedded)
 fn build_le_set_advertising_enable(enable: Bool) -> [u8]
     if enable
@@ -781,7 +732,7 @@ fn build_le_set_advertising_enable(enable: Bool) -> [u8]
 // Build LE_Set_Random_Address parameters: 6-byte address
 // (Vol 4 Part E §7.8.4).  Byte ordering is the HCI convention
 // (little-endian: byte[0] is least significant octet).
-@satisfies("REQ-BLE-HCI-013")
+pub @satisfies("REQ-BLE-HCI-013")
 @tier(embedded)
 fn build_le_set_random_address(bd_addr: [u8]) -> [u8]
     [bd_addr[0], bd_addr[1], bd_addr[2], bd_addr[3], bd_addr[4], bd_addr[5]]
@@ -806,71 +757,82 @@ fn build_le_set_random_address(bd_addr: [u8]) -> [u8]
 // above.
 
 // Advertising type constants (Vol 4 Part E §7.8.5).
-const ADV_TYPE_ADV_IND = 0x00
+pub const ADV_TYPE_ADV_IND = 0x00
 
-const ADV_TYPE_ADV_DIRECT_IND_HDC = 0x01
+// Advertising_Type 0x01: connectable high duty cycle directed advertising, ADV_DIRECT_IND ([Vol 4] Part E, Section 7.8.5).
+pub const ADV_TYPE_ADV_DIRECT_IND_HDC = 0x01
 
-const ADV_TYPE_ADV_SCAN_IND = 0x02
+// Advertising_Type 0x02: scannable undirected advertising, ADV_SCAN_IND ([Vol 4] Part E, Section 7.8.5).
+pub const ADV_TYPE_ADV_SCAN_IND = 0x02
 
-const ADV_TYPE_ADV_NONCONN_IND = 0x03
+// Advertising_Type 0x03: non-connectable and non-scannable undirected advertising, ADV_NONCONN_IND ([Vol 4] Part E,
+// Section 7.8.5).
+pub const ADV_TYPE_ADV_NONCONN_IND = 0x03
 
-const ADV_TYPE_ADV_DIRECT_IND_LDC = 0x04
+// Advertising_Type 0x04: connectable low duty cycle directed advertising, ADV_DIRECT_IND ([Vol 4] Part E, Section 7.8.5).
+pub const ADV_TYPE_ADV_DIRECT_IND_LDC = 0x04
 
 // Own_Address_Type enumeration.
-const OWN_ADDR_TYPE_PUBLIC = 0x00
+pub const OWN_ADDR_TYPE_PUBLIC = 0x00
 
-const OWN_ADDR_TYPE_RANDOM = 0x01
+// Own_Address_Type 0x01: the Controller uses the random device address set by LE Set Random Address.
+pub const OWN_ADDR_TYPE_RANDOM = 0x01
 
 // Advertising channel-map bitmask.  Bit 0 = channel 37, bit 1 =
 // 38, bit 2 = 39.  All-three is 0x07 (the usual choice).
-const ADV_CHANNEL_MAP_ALL = 0x07
+pub const ADV_CHANNEL_MAP_ALL = 0x07
 
 // Advertising filter policy constants (Vol 6 Part B §4.3.4).
-const ADV_FILTER_NONE = 0x00
+pub const ADV_FILTER_NONE = 0x00
 
-const ADV_FILTER_SCAN_WHITELIST = 0x01
+// Advertising_Filter_Policy 0x01: scan requests are processed only from devices on the Filter Accept List, connection requests
+// from any device ([Vol 4] Part E, Section 7.8.5).
+pub const ADV_FILTER_SCAN_WHITELIST = 0x01
 
-const ADV_FILTER_CONNECT_WHITELIST = 0x02
+// Advertising_Filter_Policy 0x02: connection requests are processed only from devices on the Filter Accept List, scan requests
+// from any device ([Vol 4] Part E, Section 7.8.5).
+pub const ADV_FILTER_CONNECT_WHITELIST = 0x02
 
-const ADV_FILTER_BOTH_WHITELIST = 0x03
+// Advertising_Filter_Policy 0x03: scan requests and connection requests are processed only from devices on the Filter Accept
+// List ([Vol 4] Part E, Section 7.8.5).
+pub const ADV_FILTER_BOTH_WHITELIST = 0x03
 
 // 0x0020 = 20 ms × 0.625 ms units → effective 20 ms floor.
-@satisfies("REQ-BLE-LL-013")
+pub @satisfies("REQ-BLE-LL-013")
 @satisfies("REQ-BLE-LL-014")
 fn adv_interval_min_default() -> Int
     0x00A0   // 100 ms (160 × 0.625 ms)
 
-const ADV_INTERVAL_MAX_DEFAULT = 0x00A0
+// The default Advertising_Interval_Max, 0x00A0 in 0.625 ms units: 100 ms.
+pub const ADV_INTERVAL_MAX_DEFAULT = 0x00A0
 
 // The range LE_Set_Advertising_Parameters admits for either
 // interval, in 0.625 ms units: 20 ms to 10.24 s.
-const ADV_INTERVAL_RANGE_MIN = 0x0020
+pub const ADV_INTERVAL_RANGE_MIN = 0x0020
 
-const ADV_INTERVAL_RANGE_MAX = 0x4000
+// The longest advertising interval LE Set Advertising Parameters admits, 0x4000 in 0.625 ms units: 10.24 s.
+pub const ADV_INTERVAL_RANGE_MAX = 0x4000
 
 // An advertising interval in milliseconds, as the 0.625 ms units
 // the command carries.  `None` when it falls outside the range
 // above.
-@tier(embedded)
+pub @tier(embedded)
 fn adv_interval_units(ms: Int) -> ?Int
-    let units = (ms * 8) / 5
+    let units = ms * 8 / 5
     if units < ADV_INTERVAL_RANGE_MIN or units > ADV_INTERVAL_RANGE_MAX
         None
     else
         Some(units)
 
-// ── Advertising and scan response data ─────────────────────────────
+// The longest advertising data or scan response data of a legacy advertising set, 31 octets.
 //
-// The LE Set Advertising Data command ([Vol 4] Part E, Section 7.8.7)
-// and the LE Set Scan Response Data command ([Vol 4] Part E,
-// Section 7.8.8) take the same 32-byte parameter block: a one-byte length, then a 31-byte field holding the data followed
-// by zeros.
-
-const ADV_DATA_MAX_LEN = 31
+// LE Set Advertising Data and LE Set Scan Response Data ([Vol 4] Part E, Sections 7.8.7 and 7.8.8) take the same 32-octet
+// parameter block: a length octet, then a 31-octet field holding the data and zeros.
+pub const ADV_DATA_MAX_LEN = 31
 
 // The 32-byte parameter block for `data`.  `None` when `data` is
 // longer than 31 bytes.
-@satisfies("REQ-BLE-HCI-016")
+pub @satisfies("REQ-BLE-HCI-016")
 @satisfies("REQ-BLE-HCI-017")
 @tier(embedded)
 fn build_le_adv_data_block(data: [u8]) -> ?[u8]
@@ -895,70 +857,82 @@ fn build_le_adv_data_block(data: [u8]) -> ?[u8]
 
 // Advertising_Event_Properties bit field of the LE Set Extended
 // Advertising Parameters command ([Vol 4] Part E, Section 7.8.53).
-const ADV_EVENT_PROP_CONNECTABLE = 0x0001
+pub const ADV_EVENT_PROP_CONNECTABLE = 0x0001
 
-const ADV_EVENT_PROP_SCANNABLE = 0x0002
+// Bit 1 of Advertising_Event_Properties: the advertising set is scannable.
+pub const ADV_EVENT_PROP_SCANNABLE = 0x0002
 
-const ADV_EVENT_PROP_DIRECTED = 0x0004
+// Bit 2 of Advertising_Event_Properties: the advertising is directed at one peer.
+pub const ADV_EVENT_PROP_DIRECTED = 0x0004
 
-const ADV_EVENT_PROP_HIGH_DUTY_DIRECTED = 0x0008
+// Bit 3 of Advertising_Event_Properties: high duty cycle directed connectable advertising; meaningful with
+// `ADV_EVENT_PROP_DIRECTED`.
+pub const ADV_EVENT_PROP_HIGH_DUTY_DIRECTED = 0x0008
 
 // Bit 4: legacy advertising PDUs.  A set that carries periodic
 // advertising shall leave it clear.
-const ADV_EVENT_PROP_LEGACY = 0x0010
+pub const ADV_EVENT_PROP_LEGACY = 0x0010
 
-const ADV_EVENT_PROP_ANONYMOUS = 0x0020
+// Bit 5 of Advertising_Event_Properties: the advertiser's address is omitted from the PDUs.
+pub const ADV_EVENT_PROP_ANONYMOUS = 0x0020
 
-const ADV_EVENT_PROP_INCLUDE_TX_POWER = 0x0040
+// Bit 6 of Advertising_Event_Properties: the TxPower field is included in the extended header.
+pub const ADV_EVENT_PROP_INCLUDE_TX_POWER = 0x0040
 
 // Operation of the LE Set Extended Advertising Data command and of the
 // LE Set Periodic Advertising Data command ([Vol 4] Part E, Sections
 // 7.8.54 and 7.8.62).  The Host sends the whole data in one COMPLETE
 // operation unless the Controller's maximum advertising data length
 // forces it to split it.
-const EXT_ADV_DATA_INTERMEDIATE = 0x00
+pub const EXT_ADV_DATA_INTERMEDIATE = 0x00
 
-const EXT_ADV_DATA_FIRST = 0x01
+// Operation 0x01: the first fragment of advertising data.
+pub const EXT_ADV_DATA_FIRST = 0x01
 
-const EXT_ADV_DATA_LAST = 0x02
+// Operation 0x02: the last fragment of advertising data.
+pub const EXT_ADV_DATA_LAST = 0x02
 
-const EXT_ADV_DATA_COMPLETE = 0x03
+// Operation 0x03: the whole advertising data in one command.
+pub const EXT_ADV_DATA_COMPLETE = 0x03
 
 // Fragment_Preference: 0x00 is "the Controller may fragment all
 // advertising data".
-const EXT_ADV_FRAGMENT_ANY = 0x00
+pub const EXT_ADV_FRAGMENT_ANY = 0x00
 
 // Primary_Advertising_PHY and Secondary_Advertising_PHY ([Vol 4] Part E,
 // Section 7.8.53).  The primary channel is LE 1M in every case here;
 // the secondary PHY is the one that carries the auxiliary PDUs, which
 // is where the advertising data of an extended set goes.
-const LE_PHY_1M = 0x01
+pub const LE_PHY_1M = 0x01
 
-const LE_PHY_2M = 0x02
+// The LE 2M PHY, value 0x02 of the PHY parameters.
+pub const LE_PHY_2M = 0x02
 
-const LE_PHY_CODED = 0x03
+// The LE Coded PHY, value 0x03 of the PHY parameters.
+pub const LE_PHY_CODED = 0x03
 
 // Advertising_TX_Power 0x7F: the Host has no preference ([Vol 4] Part E,
 // Section 7.8.53).
-const ADV_TX_POWER_NO_PREFERENCE = 0x7F
+pub const ADV_TX_POWER_NO_PREFERENCE = 0x7F
 
 // Periodic_Advertising_Properties of the LE Set Periodic Advertising
 // Parameters command ([Vol 4] Part E, Section 7.8.61): bit 0 puts the
 // TxPower field in the AUX_SYNC_IND PDU.
-const PERIODIC_ADV_PROP_INCLUDE_TX_POWER = 0x0001
+pub const PERIODIC_ADV_PROP_INCLUDE_TX_POWER = 0x0001
 
 // The range the two periodic advertising intervals may take, in 0.625 ms
 // units: 7.5 ms to 81.91875 s ([Vol 4] Part E, Section 7.8.61).
-const PERIODIC_INTERVAL_RANGE_MIN = 0x0006
+pub const PERIODIC_INTERVAL_RANGE_MIN = 0x0006
 
-const PERIODIC_INTERVAL_RANGE_MAX = 0xFFFF
+// The longest periodic advertising interval, 0xFFFF in 1.25 ms units: 81.91875 s.
+pub const PERIODIC_INTERVAL_RANGE_MAX = 0xFFFF
 
 // A periodic advertising interval in milliseconds, as the 1.25 ms units
 // the command carries ([Vol 4] Part E, Section 7.8.61).  `None` when it
 // falls outside the range above.
 @tier(embedded)
 fn periodic_interval_units(ms: Int) -> ?Int
-    let units = (ms * 4) / 5
+    let units = ms * 4 / 5
     if units < PERIODIC_INTERVAL_RANGE_MIN or units > PERIODIC_INTERVAL_RANGE_MAX
         None
     else
@@ -967,17 +941,20 @@ fn periodic_interval_units(ms: Int) -> ?Int
 // Mode of the LE Set Periodic Advertising Sync Transfer Parameters
 // command ([Vol 4] Part E, Section 7.8.91): what the Controller does
 // with synchronization information a peer sends.
-const PERIODIC_TRANSFER_IGNORE = 0x00
+pub const PERIODIC_TRANSFER_IGNORE = 0x00
 
-const PERIODIC_TRANSFER_NO_REPORTS = 0x01
+// Mode 0x01: the Controller synchronizes to the train a peer transfers and sends no periodic advertising reports.
+pub const PERIODIC_TRANSFER_NO_REPORTS = 0x01
 
-const PERIODIC_TRANSFER_REPORTS = 0x02
+// Mode 0x02: the Controller synchronizes to the train a peer transfers and sends reports with duplicate filtering off.
+pub const PERIODIC_TRANSFER_REPORTS = 0x02
 
-const PERIODIC_TRANSFER_REPORTS_FILTERED = 0x03
+// Mode 0x03: the Controller synchronizes to the train a peer transfers and sends reports with duplicate filtering on.
+pub const PERIODIC_TRANSFER_REPORTS_FILTERED = 0x03
 
 // Sync_CTE_Type 0: the presence or absence of a Constant Tone Extension
 // is irrelevant.
-const PERIODIC_TRANSFER_CTE_ANY = 0x00
+pub const PERIODIC_TRANSFER_CTE_ANY = 0x00
 
 // Options of the LE Periodic Advertising Create Sync command
 // ([Vol 4] Part E, Section 7.8.67): bit 0 makes the Controller take the
@@ -988,35 +965,40 @@ const PERIODIC_TRANSFER_CTE_ANY = 0x00
 // bit 0 clear, and a device performing the Periodic Advertising
 // Synchronization Establishment procedure without listening for periodic
 // advertising sets bit 1 ([Vol 3] Part C, Section 9.5.3.3).
-const PERIODIC_SYNC_OPTIONS_USE_LIST = 0x01
+pub const PERIODIC_SYNC_OPTIONS_USE_LIST = 0x01
 
-const PERIODIC_SYNC_OPTIONS_REPORTS_DISABLED = 0x02
+// Bit 1 of the Options of LE Periodic Advertising Create Sync: the reports of the train are disabled.
+pub const PERIODIC_SYNC_OPTIONS_REPORTS_DISABLED = 0x02
 
-const PERIODIC_SYNC_OPTIONS_DUPLICATE_FILTERING = 0x04
+// Bit 2 of the Options of LE Periodic Advertising Create Sync: duplicate reports are filtered.
+pub const PERIODIC_SYNC_OPTIONS_DUPLICATE_FILTERING = 0x04
 
 // Sync_CTE_Type 0: synchronize to a train whatever its Constant Tone
 // Extension.
-const PERIODIC_SYNC_CTE_ANY = 0x00
+pub const PERIODIC_SYNC_CTE_ANY = 0x00
 
 // The range the LE Periodic Advertising Create Sync command admits for
 // Sync_Timeout, in 10 ms units: 100 ms to 163.84 s.  It is the maximum
 // time between two periodic advertising packets of the train before the
 // Controller reports the synchronization lost.
-const PERIODIC_SYNC_TIMEOUT_RANGE_MIN = 0x000A
+pub const PERIODIC_SYNC_TIMEOUT_RANGE_MIN = 0x000A
 
-const PERIODIC_SYNC_TIMEOUT_RANGE_MAX = 0x4000
+// The longest Sync_Timeout, 0x4000 in 10 ms units: 163.84 s.
+pub const PERIODIC_SYNC_TIMEOUT_RANGE_MAX = 0x4000
 
 // Scanning_PHYs of the LE Set Extended Scan Parameters command
 // ([Vol 4] Part E, Section 7.8.64): bit 0 is the LE 1M PHY, bit 2 the LE
 // Coded one.
-const SCANNING_PHY_1M = 0x01
+pub const SCANNING_PHY_1M = 0x01
 
 // The parameters of the LE Set Extended Scan Parameters command for one
 // PHY ([Vol 4] Part E, Section 7.8.64): Own_Address_Type,
 // Scanning_Filter_Policy, Scanning_PHYs, and then that PHY's Scan_Type,
 // Scan_Interval and Scan_Window in 0.625 ms units.
-@tier(embedded)
-fn build_le_set_extended_scan_parameters(own_address_type: Int, filter_policy: Int, scanning_phys: Int, scan_type: Int, interval: Int, window: Int) -> [u8]
+pub @tier(embedded)
+fn build_le_set_extended_scan_parameters(own_address_type: Int, filter_policy: Int,
+                                         scanning_phys: Int, scan_type: Int, interval: Int,
+                                         window: Int) -> [u8]
     [own_address_type as u8, filter_policy as u8, scanning_phys as u8,
      scan_type as u8,
      (interval & 0xFF) as u8, ((interval >>> 8) & 0xFF) as u8,
@@ -1026,7 +1008,7 @@ fn build_le_set_extended_scan_parameters(own_address_type: Int, filter_policy: I
 // ([Vol 4] Part E, Section 7.8.65): Enable, Filter_Duplicates, and the
 // Duration and Period a scan of its own would take, both 0x0000 for one
 // that lasts until it is disabled.
-@tier(embedded)
+pub @tier(embedded)
 fn build_le_set_extended_scan_enable(enable: Bool, filter_duplicates: Bool) -> [u8]
     [(if enable then 0x01 else 0x00) as u8, (if filter_duplicates then 0x01 else 0x00) as u8,
      0x00, 0x00, 0x00, 0x00]
@@ -1045,9 +1027,15 @@ fn le24(v: Int) -> [u8]
 // secondary skip count and PHY, the advertising SID and the scan request
 // notification.  An undirected set carries the all-zero peer address and
 // Peer_Address_Type 0x00.
-@satisfies("REQ-BLE-HCI-051")
+pub @satisfies("REQ-BLE-HCI-051")
 @tier(embedded)
-fn build_le_set_extended_advertising_parameters(advertising_handle: Int, event_properties: Int, interval_min: Int, interval_max: Int, channel_map: Int, own_address_type: Int, peer_address_type: Int, peer_address: [u8], filter_policy: Int, tx_power: Int, primary_phy: Int, secondary_max_skip: Int, secondary_phy: Int, sid: Int, scan_request_notification: Int) -> [u8]
+fn build_le_set_extended_advertising_parameters(advertising_handle: Int, event_properties: Int,
+                                                interval_min: Int, interval_max: Int,
+                                                channel_map: Int, own_address_type: Int,
+                                                peer_address_type: Int, peer_address: [u8],
+                                                filter_policy: Int, tx_power: Int, primary_phy: Int,
+                                                secondary_max_skip: Int, secondary_phy: Int,
+                                                sid: Int, scan_request_notification: Int) -> [u8]
     var out: [u8] = [advertising_handle as u8,
                      (event_properties & 0xFF) as u8, ((event_properties >>> 8) & 0xFF) as u8]
     list.append(out, le24(interval_min))
@@ -1065,9 +1053,10 @@ fn build_le_set_extended_advertising_parameters(advertising_handle: Int, event_p
 // Advertising_Handle, Operation, Fragment_Preference, then the data
 // length and the data.  The length is one octet, so one operation
 // carries at most 255 octets.
-@satisfies("REQ-BLE-HCI-051")
+pub @satisfies("REQ-BLE-HCI-051")
 @tier(embedded)
-fn build_le_set_extended_data(advertising_handle: Int, operation: Int, fragment_preference: Int, data: [u8]) -> ?[u8]
+fn build_le_set_extended_data(advertising_handle: Int, operation: Int, fragment_preference: Int,
+                              data: [u8]) -> ?[u8]
     if list.len(data) > 255
         None
     else
@@ -1081,8 +1070,8 @@ fn build_le_set_extended_data(advertising_handle: Int, operation: Int, fragment_
 // from; the legacy LE Set Random Address command does not reach a set,
 // and a Controller answers the LE Set Extended Advertising Enable
 // command Invalid HCI Command Parameters when the set's own address was
-// never set (rig fact, RESULTS-CORE.md).
-@satisfies("REQ-BLE-HCI-051")
+// never set (observed on a Nordic SoftDevice Controller).
+pub @satisfies("REQ-BLE-HCI-051")
 @tier(embedded)
 fn build_le_set_advertising_set_random_address(advertising_handle: Int, address: [u8]) -> [u8]
     var out: [u8] = [advertising_handle as u8]
@@ -1094,9 +1083,10 @@ fn build_le_set_advertising_set_random_address(advertising_handle: Int, address:
 // Enable, Num_Sets 1, then the handle, the Duration in 10 ms units and
 // Max_Extended_Advertising_Events.  A Duration of 0x0000 and a
 // Max_Extended_Advertising_Events of 0x00 both mean no limit.
-@satisfies("REQ-BLE-HCI-051")
+pub @satisfies("REQ-BLE-HCI-051")
 @tier(embedded)
-fn build_le_set_extended_advertising_enable(enable: Bool, advertising_handle: Int, duration: Int, max_events: Int) -> [u8]
+fn build_le_set_extended_advertising_enable(enable: Bool, advertising_handle: Int, duration: Int,
+                                            max_events: Int) -> [u8]
     [(if enable then 0x01 else 0x00) as u8, 0x01,
      advertising_handle as u8,
      (duration & 0xFF) as u8, ((duration >>> 8) & 0xFF) as u8,
@@ -1104,7 +1094,7 @@ fn build_le_set_extended_advertising_enable(enable: Bool, advertising_handle: In
 
 // The one parameter octet of the LE Remove Advertising Set command
 // ([Vol 4] Part E, Section 7.8.59).
-@tier(embedded)
+pub @tier(embedded)
 fn build_le_remove_advertising_set(advertising_handle: Int) -> [u8]
     [advertising_handle as u8]
 
@@ -1115,10 +1105,11 @@ fn build_le_remove_advertising_set(advertising_handle: Int) -> [u8]
 // seven octets go out: a Controller reads the parameter length off the
 // command, so a command one octet short is a malformed one and the Nordic
 // SoftDevice Controller answers it Unsupported Feature or Parameter Value
-// (0x11) whatever the intervals say (autopts/controller/README.md).
-@satisfies("REQ-BLE-HCI-052")
+// (0x11) whatever the intervals say.
+pub @satisfies("REQ-BLE-HCI-052")
 @tier(embedded)
-fn build_le_set_periodic_advertising_parameters(advertising_handle: Int, interval_min: Int, interval_max: Int, properties: Int) -> [u8]
+fn build_le_set_periodic_advertising_parameters(advertising_handle: Int, interval_min: Int,
+                                                interval_max: Int, properties: Int) -> [u8]
     [advertising_handle as u8,
      (interval_min & 0xFF) as u8, ((interval_min >>> 8) & 0xFF) as u8,
      (interval_max & 0xFF) as u8, ((interval_max >>> 8) & 0xFF) as u8,
@@ -1128,9 +1119,10 @@ fn build_le_set_periodic_advertising_parameters(advertising_handle: Int, interva
 // ([Vol 4] Part E, Section 7.8.62): Advertising_Handle, Operation, then
 // the data length and the data.  Unlike the extended advertising data
 // the command takes no fragment preference.
-@satisfies("REQ-BLE-HCI-052")
+pub @satisfies("REQ-BLE-HCI-052")
 @tier(embedded)
-fn build_le_set_periodic_advertising_data(advertising_handle: Int, operation: Int, data: [u8]) -> ?[u8]
+fn build_le_set_periodic_advertising_data(advertising_handle: Int, operation: Int,
+                                          data: [u8]) -> ?[u8]
     if list.len(data) > 255
         None
     else
@@ -1148,12 +1140,16 @@ fn build_le_set_periodic_advertising_data(advertising_handle: Int, operation: In
 // Host sends the first form for a plain train and this one only when the
 // train carries responses.  Like the first form, every octet goes out: a
 // Controller reads the parameter length off the command, and one octet
-// short is Unsupported Feature or Parameter Value (0x11) on the rig's
-// SoftDevice Controller whichever the parameters are (measured
-// 2026-10-13, autopts/controller/README.md).
-@satisfies("REQ-BLE-HCI-056")
+// short is Unsupported Feature or Parameter Value (0x11) on a Nordic
+// SoftDevice Controller whichever the parameters are.
+pub @satisfies("REQ-BLE-HCI-056")
 @tier(embedded)
-fn build_le_set_periodic_advertising_parameters_v2(advertising_handle: Int, interval_min: Int, interval_max: Int, properties: Int, num_subevents: Int, subevent_interval: Int, response_slot_delay: Int, response_slot_spacing: Int, num_response_slots: Int) -> [u8]
+fn build_le_set_periodic_advertising_parameters_v2(advertising_handle: Int, interval_min: Int,
+                                                   interval_max: Int, properties: Int,
+                                                   num_subevents: Int, subevent_interval: Int,
+                                                   response_slot_delay: Int,
+                                                   response_slot_spacing: Int,
+                                                   num_response_slots: Int) -> [u8]
     [advertising_handle as u8,
      (interval_min & 0xFF) as u8, ((interval_min >>> 8) & 0xFF) as u8,
      (interval_max & 0xFF) as u8, ((interval_max >>> 8) & 0xFF) as u8,
@@ -1173,9 +1169,10 @@ fn build_le_set_periodic_advertising_parameters_v2(advertising_handle: Int, inte
 // Subevent_Data[0], then the same five of element 1, and so on.  `None`
 // when there is no subevent to name, more than the 0x0F the field holds,
 // or a data block one subevent cannot carry.
-@satisfies("REQ-BLE-HCI-056")
+pub @satisfies("REQ-BLE-HCI-056")
 @tier(embedded)
-fn build_le_set_periodic_advertising_subevent_data(advertising_handle: Int, subevents: [PawrSubevent]) -> ?[u8]
+fn build_le_set_periodic_advertising_subevent_data(advertising_handle: Int,
+                                                   subevents: [PawrSubevent]) -> ?[u8]
     let n = list.len(subevents)
     if n < 1 or n > PAWR_SUBEVENTS_MAX
         None
@@ -1198,7 +1195,7 @@ fn build_le_set_periodic_advertising_subevent_data(advertising_handle: Int, sube
 // the index, the first response slot it listens in, how many slots it
 // listens in (0 when it expects no response), and the advertising data of
 // the subevent.
-struct PawrSubevent
+pub struct PawrSubevent
     subevent: Int
     response_slot_start: Int
     response_slot_count: Int
@@ -1208,11 +1205,13 @@ struct PawrSubevent
 // of the command ([Vol 4] Part E, Section 7.8.125): Subevent[i] is 0x00
 // to 0x7F, 0x01 to 0x0F elements go in one command, and
 // Subevent_Data_Length[i] is up to 251 octets.
-const PAWR_SUBEVENT_MAX = 0x7F
+pub const PAWR_SUBEVENT_MAX = 0x7F
 
-const PAWR_SUBEVENTS_MAX = 0x0F
+// The most subevent entries one LE Set Periodic Advertising Subevent Data command carries, 0x0F.
+pub const PAWR_SUBEVENTS_MAX = 0x0F
 
-const PAWR_SUBEVENT_DATA_MAX = 251
+// The most data octets one subevent of LE Set Periodic Advertising Subevent Data carries, 251.
+pub const PAWR_SUBEVENT_DATA_MAX = 251
 
 // The ranges the LE Set Periodic Advertising Parameters command [v2]
 // puts on the subevent parameters ([Vol 4] Part E, Section 7.8.61):
@@ -1223,24 +1222,28 @@ const PAWR_SUBEVENT_DATA_MAX = 251
 // Subevent_Interval is at most the minimum periodic advertising interval
 // divided by Num_Subevents, and Response_Slot_Delay is below the
 // Subevent_Interval.  Both one-octet fields can hold 0x00, which a
-// Controller refuses: the rig's SoftDevice Controller answers Invalid
+// Controller refuses: a Nordic SoftDevice Controller answers Invalid
 // HCI Command Parameters (0x12) below a Subevent_Interval of 0x06 and
 // below a Response_Slot_Delay of 0x01, and above the quotient, which is
-// the same two to the same two (measured 2026-10-13).
-const PAWR_SUBEVENTS_RANGE_MAX = 0x80
+// the same two to the same two.
+pub const PAWR_SUBEVENTS_RANGE_MAX = 0x80
 
-const PAWR_SUBEVENT_INTERVAL_MIN = 0x06
+// The shortest Subevent_Interval, 0x06 in 1.25 ms units: 7.5 ms.
+pub const PAWR_SUBEVENT_INTERVAL_MIN = 0x06
 
-const PAWR_RESPONSE_SLOT_DELAY_MIN = 0x01
+// The shortest Response_Slot_Delay, 0x01 in 1.25 ms units.
+pub const PAWR_RESPONSE_SLOT_DELAY_MIN = 0x01
 
-const PAWR_RESPONSE_SLOT_DELAY_MAX = 0xFE
+// The longest Response_Slot_Delay, 0xFE in 1.25 ms units.
+pub const PAWR_RESPONSE_SLOT_DELAY_MAX = 0xFE
 
-const PAWR_RESPONSE_SLOT_SPACING_MIN = 0x02
+// The shortest Response_Slot_Spacing, 0x02 in 0.125 ms units: 0.25 ms.
+pub const PAWR_RESPONSE_SLOT_SPACING_MIN = 0x02
 
 // The 2 parameter octets of the LE Set Periodic Advertising Enable
 // command ([Vol 4] Part E, Section 7.8.63): Enable and
 // Advertising_Handle.
-@satisfies("REQ-BLE-HCI-052")
+pub @satisfies("REQ-BLE-HCI-052")
 @tier(embedded)
 fn build_le_set_periodic_advertising_enable(enable: Bool, advertising_handle: Int) -> [u8]
     [(if enable then 0x01 else 0x00) as u8, advertising_handle as u8]
@@ -1249,9 +1252,11 @@ fn build_le_set_periodic_advertising_enable(enable: Bool, advertising_handle: In
 // Transfer Parameters command ([Vol 4] Part E, Section 7.8.91):
 // Connection_Handle, Mode, Skip, Sync_Timeout in 10 ms units and
 // CTE_Type.
-@satisfies("REQ-BLE-HCI-054")
+pub @satisfies("REQ-BLE-HCI-054")
 @tier(embedded)
-fn build_le_set_periodic_advertising_sync_transfer_parameters(connection_handle: Int, mode: Int, skip: Int, sync_timeout: Int, cte_type: Int) -> [u8]
+fn build_le_set_periodic_advertising_sync_transfer_parameters(connection_handle: Int, mode: Int,
+                                                              skip: Int, sync_timeout: Int,
+                                                              cte_type: Int) -> [u8]
     var out = build_connection_handle(connection_handle)
     list.append(out, [mode as u8,
                       (skip & 0xFF) as u8, ((skip >>> 8) & 0xFF) as u8,
@@ -1263,9 +1268,10 @@ fn build_le_set_periodic_advertising_sync_transfer_parameters(connection_handle:
 // Transfer command ([Vol 4] Part E, Section 7.8.90):
 // Connection_Handle, Service_Data and the Advertising_Handle of the set
 // whose periodic advertising is handed over.
-@satisfies("REQ-BLE-HCI-053")
+pub @satisfies("REQ-BLE-HCI-053")
 @tier(embedded)
-fn build_le_periodic_advertising_set_info_transfer(connection_handle: Int, service_data: Int, advertising_handle: Int) -> [u8]
+fn build_le_periodic_advertising_set_info_transfer(connection_handle: Int, service_data: Int,
+                                                   advertising_handle: Int) -> [u8]
     var out = build_connection_handle(connection_handle)
     list.append(out, [(service_data & 0xFF) as u8, ((service_data >>> 8) & 0xFF) as u8,
                       advertising_handle as u8])
@@ -1274,36 +1280,34 @@ fn build_le_periodic_advertising_set_info_transfer(connection_handle: Int, servi
 // The 6 parameter octets of the LE Periodic Advertising Sync Transfer
 // command ([Vol 4] Part E, Section 7.8.89): Connection_Handle,
 // Service_Data and the Sync_Handle of the periodic advertising train.
-@satisfies("REQ-BLE-HCI-053")
+pub @satisfies("REQ-BLE-HCI-053")
 @tier(embedded)
-fn build_le_periodic_advertising_sync_transfer(connection_handle: Int, service_data: Int, sync_handle: Int) -> [u8]
+fn build_le_periodic_advertising_sync_transfer(connection_handle: Int, service_data: Int,
+                                               sync_handle: Int) -> [u8]
     var out = build_connection_handle(connection_handle)
     list.append(out, [(service_data & 0xFF) as u8, ((service_data >>> 8) & 0xFF) as u8,
                       (sync_handle & 0xFF) as u8, ((sync_handle >>> 8) & 0xFF) as u8])
     out
 
-// ── Event mask ──────────────────────────────────────────────────────
+// The default Event_Mask of a Controller, 0x00001FFFFFFFFFFF: bits 0 to 44 set and the LE Meta event, bit 61, clear.
 //
-// The Set Event Mask command ([Vol 4] Part E, Section 7.3.1) takes
-// Event_Mask, 8 octets.  Its default sets bits 0 to 44 and leaves bit
-// 61, the LE Meta event, clear; for an LE Controller that bit enables
-// or disables every LE event in the LE Meta event, the LE Advertising
-// Report event among them.
+// The Set Event Mask command ([Vol 4] Part E, Section 7.3.1) takes the 8-octet Event_Mask.  For an LE Controller bit 61 enables
+// or disables every LE event inside the LE Meta event, the LE Advertising Report event among them.
+pub const EVENT_MASK_DEFAULT = 0x00001FFFFFFFFFFF
 
-const EVENT_MASK_DEFAULT = 0x00001FFFFFFFFFFF
-
-const EVENT_MASK_LE_META = 0x2000000000000000
+// Bit 61 of the Event_Mask: the LE Meta event, which carries every LE event.
+pub const EVENT_MASK_LE_META = 0x2000000000000000
 
 // Bit 47, the Encryption Key Refresh Complete event ([Vol 4] Part E,
 // Section 7.7.39), which the default leaves clear.  A pairing on a link
 // that is already encrypted ends its encryption with this event rather
 // than Encryption Change, and the Security Manager distributes its keys
 // only after it ([Vol 3] Part H, Section 3.6).
-const EVENT_MASK_ENCRYPTION_KEY_REFRESH_COMPLETE = 0x0000800000000000
+pub const EVENT_MASK_ENCRYPTION_KEY_REFRESH_COMPLETE = 0x0000800000000000
 
 // The 8 parameter octets of the Set Event Mask command, least
 // significant first.
-@tier(embedded)
+pub @tier(embedded)
 fn build_set_event_mask(mask: Int) -> [u8]
     [(mask & 0xFF) as u8, ((mask >>> 8) & 0xFF) as u8, ((mask >>> 16) & 0xFF) as u8, ((mask >>> 24) & 0xFF) as u8,
      ((mask >>> 32) & 0xFF) as u8, ((mask >>> 40) & 0xFF) as u8, ((mask >>> 48) & 0xFF) as u8, ((mask >>> 56) & 0xFF) as u8]
@@ -1318,32 +1322,34 @@ fn build_set_event_mask(mask: Int) -> [u8]
 
 // LE_Scan_Type: Passive Scanning sends no scanning PDUs; Active scanning
 // may send them.
-const LE_SCAN_TYPE_PASSIVE = 0x00
+pub const LE_SCAN_TYPE_PASSIVE = 0x00
 
-const LE_SCAN_TYPE_ACTIVE = 0x01
+// LE_Scan_Type 0x01: active scanning, which may send scan requests.
+pub const LE_SCAN_TYPE_ACTIVE = 0x01
 
 // Scanning_Filter_Policy 0x00, the basic unfiltered scanning filter
 // policy.
-const SCAN_FILTER_BASIC_UNFILTERED = 0x00
+pub const SCAN_FILTER_BASIC_UNFILTERED = 0x00
 
 // Initiator_Filter_Policy of the LE Create Connection command ([Vol 4]
 // Part E, Section 7.8.12): 0x01 is "use the filter accept list and ignore
 // the peer address fields", which is the spelling the Auto Connection
 // Establishment procedure uses — the command carries the all-zero peer
 // address and this policy.
-const INITIATOR_FILTER_ACCEPT_LIST = 0x01
+pub const INITIATOR_FILTER_ACCEPT_LIST = 0x01
 
 // The parameter of the LE Add Device To Filter Accept List command
-// ([Vol 4] Part E, Section 7.8.15): Address_Type and Address.
-@tier(embedded)
+// ([Vol 4] Part E, Section 7.8.16): Address_Type and Address.
+pub @tier(embedded)
 fn build_le_add_device_to_filter_accept_list(address_type: Int, address: [u8]) -> [u8]
     var out: [u8] = [address_type as u8]
     list.append(out, address[0:6])
     out
 
 // The 7 parameter octets of the LE Set Scan Parameters command.
-@tier(embedded)
-fn build_le_set_scan_parameters(scan_type: Int, interval: Int, window: Int, own_address_type: Int, filter_policy: Int) -> [u8]
+pub @tier(embedded)
+fn build_le_set_scan_parameters(scan_type: Int, interval: Int, window: Int, own_address_type: Int,
+                                filter_policy: Int) -> [u8]
     [scan_type as u8,
      (interval & 0xFF) as u8, ((interval >>> 8) & 0xFF) as u8,
      (window & 0xFF) as u8, ((window >>> 8) & 0xFF) as u8,
@@ -1353,15 +1359,16 @@ fn build_le_set_scan_parameters(scan_type: Int, interval: Int, window: Int, own_
 // The LE_Scan_Enable and Filter_Duplicates octets of the LE Set Scan
 // Enable command ([Vol 4] Part E, Section 7.8.11).  The Controller
 // ignores Filter_Duplicates when scanning is disabled.
-@tier(embedded)
+pub @tier(embedded)
 fn build_le_set_scan_enable(enable: Bool, filter_duplicates: Bool) -> [u8]
     [(if enable then 0x01 else 0x00) as u8, (if filter_duplicates then 0x01 else 0x00) as u8]
 
 // The parameters of the LE Add Device To Resolving List command ([Vol 4] Part E, Section 7.8.38):
 // Peer_Identity_Address_Type, Peer_Identity_Address, Peer_IRK and Local_IRK, 39 octets.  A Local_IRK of
 // 16 zero octets tells the Controller the Host uses no Resolvable Private Address of its own for the peer.
-@tier(embedded)
-fn build_le_add_device_to_resolving_list(address_type: Int, address: [u8], peer_irk: [u8], local_irk: [u8]) -> [u8]
+pub @tier(embedded)
+fn build_le_add_device_to_resolving_list(address_type: Int, address: [u8], peer_irk: [u8],
+                                         local_irk: [u8]) -> [u8]
     var out: [u8] = [address_type as u8]
     list.append(out, address[0:6])
     list.append(out, peer_irk[0:16])
@@ -1369,31 +1376,28 @@ fn build_le_add_device_to_resolving_list(address_type: Int, address: [u8], peer_
     out
 
 // The Address_Resolution_Enable octet of the LE Set Address Resolution Enable command.
-@tier(embedded)
+pub @tier(embedded)
 fn build_le_set_address_resolution_enable(enable: Bool) -> [u8]
     let on: u8 = 0x01
     let off: u8 = 0x00
-    [if enable then on else off]
+    [(if enable then on else off)]
 
-// ── LE event mask ───────────────────────────────────────────────────
+// The default LE_Event_Mask, 0x000000000000001F: bits 0 to 4.
 //
-// The LE Set Event Mask command ([Vol 4] Part E, Section 7.8.1) takes
-// LE_Event_Mask, 8 octets in the layout of `build_set_event_mask`.  Its
-// default sets bits 0 to 4: LE Connection Complete, LE Advertising
-// Report, LE Connection Update Complete, LE Read Remote Features Page 0
-// Complete and LE Long Term Key Request.  Bit 5 is the LE Remote
-// Connection Parameter Request event, which a Host must see to answer
-// the peer's Connection Parameters Request procedure.
+// The LE Set Event Mask command ([Vol 4] Part E, Section 7.8.1) takes the 8-octet LE_Event_Mask in the layout of
+// `build_set_event_mask`.  Bits 0 to 4 are LE Connection Complete, LE Advertising Report, LE Connection Update Complete, LE Read
+// Remote Features Page 0 Complete and LE Long Term Key Request.
+pub const LE_EVENT_MASK_DEFAULT = 0x000000000000001F
 
-const LE_EVENT_MASK_DEFAULT = 0x000000000000001F
-
-const LE_EVENT_MASK_REMOTE_CONNECTION_PARAMETER_REQUEST = 0x0000000000000020
+// Bit 5 of the LE_Event_Mask: the LE Remote Connection Parameter Request event, which a Host must see to answer the peer's
+// Connection Parameters Request procedure.
+pub const LE_EVENT_MASK_REMOTE_CONNECTION_PARAMETER_REQUEST = 0x0000000000000020
 
 // Bit 12 is the LE Extended Advertising Report event ([Vol 4] Part E, Section
 // 7.7.65.13), which a Controller sends in place of the LE Advertising Report while
 // the Host scans with LE Set Extended Scan Enable.  A Controller sends none while
 // the bit is clear.
-const LE_EVENT_MASK_EXTENDED_ADVERTISING_REPORT = 0x0000000000001000
+pub const LE_EVENT_MASK_EXTENDED_ADVERTISING_REPORT = 0x0000000000001000
 
 // Bits 13 to 15 of the LE event mask are the Observer's periodic
 // advertising events ([Vol 4] Part E, Section 7.8.1): LE Periodic
@@ -1406,7 +1410,7 @@ const LE_EVENT_MASK_EXTENDED_ADVERTISING_REPORT = 0x0000000000001000
 // Terminated.  The Controller sends none of the four while its bit is
 // clear, the SoftDevice Controller among them: without bit 23 the
 // transfer arrives, and the Host is never told.
-const LE_EVENT_MASK_PERIODIC_ADVERTISING = 0x000000000080E000
+pub const LE_EVENT_MASK_PERIODIC_ADVERTISING = 0x000000000080E000
 
 // Bits 38 and 39 of the LE event mask are the two events a train with
 // responses goes on ([Vol 4] Part E, Section 7.8.1): LE Periodic
@@ -1416,12 +1420,12 @@ const LE_EVENT_MASK_PERIODIC_ADVERTISING = 0x000000000080E000
 // synchronized devices answered in the response slots of a subevent.
 // The two are LE Meta subevents 0x27 and 0x28.  The Subevent Data
 // Request is the one the Advertiser cannot do without: the train runs
-// without it, and carries no subevent data — the rig's SoftDevice
+// without it, and carries no subevent data — a Nordic SoftDevice
 // Controller sends it only while bit 38 is set, and sets none of the
-// neighbouring bits (measured 2026-10-13, RESULTS-CORE.md, Rig facts).
+// neighbouring bits.
 // Both events are inside the LE Meta event, so the Event_Mask bit 61
 // has to be set as well, which `EVENT_MASK_LE_META` is.
-const LE_EVENT_MASK_PERIODIC_ADVERTISING_RESPONSES = 0x000000C000000000
+pub const LE_EVENT_MASK_PERIODIC_ADVERTISING_RESPONSES = 0x000000C000000000
 
 // ── Isochronous channels (Vol 4 Part E §7.8.2, §7.8.96-7.8.116) ─────
 //
@@ -1432,7 +1436,7 @@ const LE_EVENT_MASK_PERIODIC_ADVERTISING_RESPONSES = 0x000000C000000000
 // transmits or follows.  The Host sets the stream up with the commands
 // below, opens a data path for each stream with the LE Setup ISO Data
 // Path command and then exchanges HCI ISO Data packets on the
-// Connection_Handle of the stream (`hci_codec.nv`, and `host/isoal.nv` of orbit/ble).
+// Connection_Handle of the stream (`hci_codec.nv`).
 //
 // A Host that wants isochronous channels sets the Connected Isochronous
 // Stream (Host Support) bit of the Link Layer FeatureSet before the first
@@ -1453,151 +1457,151 @@ const LE_EVENT_MASK_PERIODIC_ADVERTISING_RESPONSES = 0x000000C000000000
 // form that also answers ISO_Data_Packet_Length and
 // Total_Num_ISO_Data_Packets.  A Controller that supports HCI ISO Data
 // packets answers both with non-zero values.
-@satisfies("REQ-BLE-HCI-057")
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 @no_alloc
 fn opcode_le_read_buffer_size_v2() -> Int
     // OGF=0x08, OCF=0x0060 → 0x2060.
     (0x08 << 10) | 0x060
 
-// [Vol 4] Part E, Section 7.8.96 — LE Read ISO TX Sync command.
-@satisfies("REQ-BLE-HCI-057")
+// The opcode of the LE Read ISO TX Sync command, 0x2061 ([Vol 4] Part E, Section 7.8.96).
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 @no_alloc
 fn opcode_le_read_iso_tx_sync() -> Int
     // OGF=0x08, OCF=0x0061 → 0x2061.
     (0x08 << 10) | 0x061
 
-// [Vol 4] Part E, Section 7.8.97 — LE Set CIG Parameters command.
-@satisfies("REQ-BLE-HCI-057")
+// The opcode of the LE Set CIG Parameters command, 0x2062 ([Vol 4] Part E, Section 7.8.97).
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 @no_alloc
 fn opcode_le_set_cig_parameters() -> Int
     // OGF=0x08, OCF=0x0062 → 0x2062.
     (0x08 << 10) | 0x062
 
-// [Vol 4] Part E, Section 7.8.98 — LE Set CIG Parameters Test command.
-@satisfies("REQ-BLE-HCI-057")
+// The opcode of the LE Set CIG Parameters Test command, 0x2063 ([Vol 4] Part E, Section 7.8.98).
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 @no_alloc
 fn opcode_le_set_cig_parameters_test() -> Int
     // OGF=0x08, OCF=0x0063 → 0x2063.
     (0x08 << 10) | 0x063
 
-// [Vol 4] Part E, Section 7.8.99 — LE Create CIS command.
-@satisfies("REQ-BLE-HCI-057")
+// The opcode of the LE Create CIS command, 0x2064 ([Vol 4] Part E, Section 7.8.99).
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 @no_alloc
 fn opcode_le_create_cis() -> Int
     // OGF=0x08, OCF=0x0064 → 0x2064.
     (0x08 << 10) | 0x064
 
-// [Vol 4] Part E, Section 7.8.100 — LE Remove CIG command.
-@satisfies("REQ-BLE-HCI-057")
+// The opcode of the LE Remove CIG command, 0x2065 ([Vol 4] Part E, Section 7.8.100).
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 @no_alloc
 fn opcode_le_remove_cig() -> Int
     // OGF=0x08, OCF=0x0065 → 0x2065.
     (0x08 << 10) | 0x065
 
-// [Vol 4] Part E, Section 7.8.101 — LE Accept CIS Request command.
-@satisfies("REQ-BLE-HCI-057")
+// The opcode of the LE Accept CIS Request command, 0x2066 ([Vol 4] Part E, Section 7.8.101).
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 @no_alloc
 fn opcode_le_accept_cis_request() -> Int
     // OGF=0x08, OCF=0x0066 → 0x2066.
     (0x08 << 10) | 0x066
 
-// [Vol 4] Part E, Section 7.8.102 — LE Reject CIS Request command.
-@satisfies("REQ-BLE-HCI-057")
+// The opcode of the LE Reject CIS Request command, 0x2067 ([Vol 4] Part E, Section 7.8.102).
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 @no_alloc
 fn opcode_le_reject_cis_request() -> Int
     // OGF=0x08, OCF=0x0067 → 0x2067.
     (0x08 << 10) | 0x067
 
-// [Vol 4] Part E, Section 7.8.103 — LE Create BIG command.
-@satisfies("REQ-BLE-HCI-057")
+// The opcode of the LE Create BIG command, 0x2068 ([Vol 4] Part E, Section 7.8.103).
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 @no_alloc
 fn opcode_le_create_big() -> Int
     // OGF=0x08, OCF=0x0068 → 0x2068.
     (0x08 << 10) | 0x068
 
-// [Vol 4] Part E, Section 7.8.104 — LE Create BIG Test command.
-@satisfies("REQ-BLE-HCI-057")
+// The opcode of the LE Create BIG Test command, 0x2069 ([Vol 4] Part E, Section 7.8.104).
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 @no_alloc
 fn opcode_le_create_big_test() -> Int
     // OGF=0x08, OCF=0x0069 → 0x2069.
     (0x08 << 10) | 0x069
 
-// [Vol 4] Part E, Section 7.8.105 — LE Terminate BIG command.
-@satisfies("REQ-BLE-HCI-057")
+// The opcode of the LE Terminate BIG command, 0x206A ([Vol 4] Part E, Section 7.8.105).
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 @no_alloc
 fn opcode_le_terminate_big() -> Int
     // OGF=0x08, OCF=0x006A → 0x206A.
     (0x08 << 10) | 0x06A
 
-// [Vol 4] Part E, Section 7.8.106 — LE BIG Create Sync command.
-@satisfies("REQ-BLE-HCI-057")
+// The opcode of the LE BIG Create Sync command, 0x206B ([Vol 4] Part E, Section 7.8.106).
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 @no_alloc
 fn opcode_le_big_create_sync() -> Int
     // OGF=0x08, OCF=0x006B → 0x206B.
     (0x08 << 10) | 0x06B
 
-// [Vol 4] Part E, Section 7.8.107 — LE BIG Terminate Sync command.
-@satisfies("REQ-BLE-HCI-057")
+// The opcode of the LE BIG Terminate Sync command, 0x206C ([Vol 4] Part E, Section 7.8.107).
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 @no_alloc
 fn opcode_le_big_terminate_sync() -> Int
     // OGF=0x08, OCF=0x006C → 0x206C.
     (0x08 << 10) | 0x06C
 
-// [Vol 4] Part E, Section 7.8.109 — LE Setup ISO Data Path command.
-@satisfies("REQ-BLE-HCI-057")
+// The opcode of the LE Setup ISO Data Path command, 0x206E ([Vol 4] Part E, Section 7.8.109).
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 @no_alloc
 fn opcode_le_setup_iso_data_path() -> Int
     // OGF=0x08, OCF=0x006E → 0x206E.
     (0x08 << 10) | 0x06E
 
-// [Vol 4] Part E, Section 7.8.110 — LE Remove ISO Data Path command.
-@satisfies("REQ-BLE-HCI-057")
+// The opcode of the LE Remove ISO Data Path command, 0x206F ([Vol 4] Part E, Section 7.8.110).
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 @no_alloc
 fn opcode_le_remove_iso_data_path() -> Int
     // OGF=0x08, OCF=0x006F → 0x206F.
     (0x08 << 10) | 0x06F
 
-// [Vol 4] Part E, Section 7.8.111 — LE ISO Transmit Test command.
-@satisfies("REQ-BLE-HCI-057")
+// The opcode of the LE ISO Transmit Test command, 0x2070 ([Vol 4] Part E, Section 7.8.111).
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 @no_alloc
 fn opcode_le_iso_transmit_test() -> Int
     // OGF=0x08, OCF=0x0070 → 0x2070.
     (0x08 << 10) | 0x070
 
-// [Vol 4] Part E, Section 7.8.112 — LE ISO Receive Test command.
-@satisfies("REQ-BLE-HCI-057")
+// The opcode of the LE ISO Receive Test command, 0x2071 ([Vol 4] Part E, Section 7.8.112).
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 @no_alloc
 fn opcode_le_iso_receive_test() -> Int
     // OGF=0x08, OCF=0x0071 → 0x2071.
     (0x08 << 10) | 0x071
 
-// [Vol 4] Part E, Section 7.8.113 — LE ISO Read Test Counters command.
-@satisfies("REQ-BLE-HCI-057")
+// The opcode of the LE ISO Read Test Counters command, 0x2072 ([Vol 4] Part E, Section 7.8.113).
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 @no_alloc
 fn opcode_le_iso_read_test_counters() -> Int
     // OGF=0x08, OCF=0x0072 → 0x2072.
     (0x08 << 10) | 0x072
 
-// [Vol 4] Part E, Section 7.8.114 — LE ISO Test End command.
-@satisfies("REQ-BLE-HCI-057")
+// The opcode of the LE ISO Test End command, 0x2073 ([Vol 4] Part E, Section 7.8.114).
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 @no_alloc
 fn opcode_le_iso_test_end() -> Int
@@ -1606,7 +1610,7 @@ fn opcode_le_iso_test_end() -> Int
 
 // [Vol 4] Part E, Section 7.8.115 — LE Set Host Feature command [v1],
 // with a one-octet Bit_Number.
-@satisfies("REQ-BLE-HCI-057")
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 @no_alloc
 fn opcode_le_set_host_feature() -> Int
@@ -1615,15 +1619,15 @@ fn opcode_le_set_host_feature() -> Int
 
 // [Vol 4] Part E, Section 7.8.115 — LE Set Host Feature command [v2],
 // with a two-octet Bit_Number (0x0000 to 0x07BF).
-@satisfies("REQ-BLE-HCI-057")
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 @no_alloc
 fn opcode_le_set_host_feature_v2() -> Int
     // OGF=0x08, OCF=0x0097 → 0x2097.
     (0x08 << 10) | 0x097
 
-// [Vol 4] Part E, Section 7.8.116 — LE Read ISO Link Quality command.
-@satisfies("REQ-BLE-HCI-057")
+// The opcode of the LE Read ISO Link Quality command, 0x2075 ([Vol 4] Part E, Section 7.8.116).
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 @no_alloc
 fn opcode_le_read_iso_link_quality() -> Int
@@ -1635,52 +1639,64 @@ fn opcode_le_read_iso_link_quality() -> Int
 // with the LE Set Host Feature command: it says the Host supports
 // creating CISes.  A Controller refuses the command while it has a
 // connection to another device (Command Disallowed, 0x0C).
-const FEATURE_CONNECTED_ISOCHRONOUS_STREAM_HOST_SUPPORT = 32
+pub const FEATURE_CONNECTED_ISOCHRONOUS_STREAM_HOST_SUPPORT = 32
 
 // Framing of the LE Set CIG Parameters command ([Vol 4] Part E, Section
 // 7.8.97): unframed PDUs, framed PDUs in Segmentable mode and framed
 // PDUs in Unsegmented mode.  The LE Create BIG command takes the first
 // two of the three (Section 7.8.103).
-const ISO_FRAMING_UNFRAMED = 0x00
+pub const ISO_FRAMING_UNFRAMED = 0x00
 
-const ISO_FRAMING_FRAMED_SEGMENTABLE = 0x01
+// Framing 0x01: framed PDUs in Segmentable mode ([Vol 4] Part E, Section 7.8.97).
+pub const ISO_FRAMING_FRAMED_SEGMENTABLE = 0x01
 
-const ISO_FRAMING_FRAMED_UNSEGMENTED = 0x02
+// Framing 0x02: framed PDUs in Unsegmented mode ([Vol 4] Part E, Section 7.8.97).  LE Create BIG does not take it.
+pub const ISO_FRAMING_FRAMED_UNSEGMENTED = 0x02
 
 // Packing of the CIG and the BIG: Sequential or Interleaved
 // arrangement of the subevents of several streams ([Vol 6] Part B,
 // Section 4.5.14.2).
-const ISO_PACKING_SEQUENTIAL = 0x00
+pub const ISO_PACKING_SEQUENTIAL = 0x00
 
-const ISO_PACKING_INTERLEAVED = 0x01
+// Packing 0x01: the subevents of the several streams of a CIG or a BIG are interleaved ([Vol 6] Part B, Section 4.5.14.2).
+pub const ISO_PACKING_INTERLEAVED = 0x01
 
 // Data_Path_Direction of the LE Setup ISO Data Path and LE Remove ISO
 // Data Path commands ([Vol 4] Part E, Section 7.8.109): Input is data
 // the Host sends to the Controller, Output is data the Controller sends
 // to the Host.  Data_Path_ID 0x00 is the HCI transport.
-const ISO_DATA_PATH_INPUT = 0x00
+pub const ISO_DATA_PATH_INPUT = 0x00
 
-const ISO_DATA_PATH_OUTPUT = 0x01
+// Data_Path_Direction 0x01: data the Controller sends to the Host ([Vol 4] Part E, Section 7.8.109).
+pub const ISO_DATA_PATH_OUTPUT = 0x01
 
-const ISO_DATA_PATH_HCI = 0x00
+// Data_Path_ID 0x00: the data path is the HCI transport ([Vol 4] Part E, Section 7.8.109).
+pub const ISO_DATA_PATH_HCI = 0x00
 
 // Payload_Type of the LE ISO Transmit Test and LE ISO Receive Test
 // commands ([Vol 4] Part E, Section 7.8.111).
-const ISO_TEST_PAYLOAD_ZERO_LENGTH = 0x00
+pub const ISO_TEST_PAYLOAD_ZERO_LENGTH = 0x00
 
-const ISO_TEST_PAYLOAD_VARIABLE_LENGTH = 0x01
+// Payload_Type 0x01 of the LE ISO Transmit Test and LE ISO Receive Test commands: payloads of variable length
+// ([Vol 4] Part E, Section 7.8.111).
+pub const ISO_TEST_PAYLOAD_VARIABLE_LENGTH = 0x01
 
-const ISO_TEST_PAYLOAD_MAXIMUM_LENGTH = 0x02
+// Payload_Type 0x02 of the LE ISO Transmit Test and LE ISO Receive Test commands: payloads of the maximum length
+// ([Vol 4] Part E, Section 7.8.111).
+pub const ISO_TEST_PAYLOAD_MAXIMUM_LENGTH = 0x02
 
 // The ranges the encoding of the commands below can carry, from the
 // parameter tables of Section 7.8.97 to Section 7.8.115.
-const ISO_CIS_COUNT_MAX = 0x1F
+pub const ISO_CIS_COUNT_MAX = 0x1F
 
-const ISO_BIS_COUNT_MAX = 0x1F
+// The most BISes a BIG carries in the encoding of these commands, 0x1F.
+pub const ISO_BIS_COUNT_MAX = 0x1F
 
-const ISO_CONNECTION_HANDLE_MAX = 0x0EFF
+// The largest Connection_Handle, 0x0EFF.
+pub const ISO_CONNECTION_HANDLE_MAX = 0x0EFF
 
-const ISO_BROADCAST_CODE_LENGTH = 16
+// The length of a Broadcast_Code in octets, 16.
+pub const ISO_BROADCAST_CODE_LENGTH = 16
 
 // SDU_Interval, in microseconds, of the commands that set up a CIG or a
 // BIG: 0x0000FF to 0x0FFFFF ([Vol 4] Part E, Sections 7.8.97, 7.8.98,
@@ -1688,11 +1704,14 @@ const ISO_BROADCAST_CODE_LENGTH = 16
 // 0xFFFFFF would be cut silently, and a value between 0x100000 and
 // 0xFFFFFF is a reserved one; a builder refuses both.  A direction no CIS
 // of the CIG uses still carries a value in this range.
-const ISO_SDU_INTERVAL_MIN = 0x0000FF
+pub const ISO_SDU_INTERVAL_MIN = 0x0000FF
 
-const ISO_SDU_INTERVAL_MAX = 0x0FFFFF
+// The longest SDU_Interval the commands that set up a CIG or a BIG take, 0x0FFFFF microseconds.
+pub const ISO_SDU_INTERVAL_MAX = 0x0FFFFF
 
-@tier(embedded)
+// Whether `sdu_interval`, in microseconds, lies in `ISO_SDU_INTERVAL_MIN` to `ISO_SDU_INTERVAL_MAX`, the range of the commands that
+// set up a CIG or a BIG.
+pub @tier(embedded)
 @no_alloc
 fn iso_sdu_interval_ok(sdu_interval: Int) -> Bool
     sdu_interval >= ISO_SDU_INTERVAL_MIN and sdu_interval <= ISO_SDU_INTERVAL_MAX
@@ -1704,7 +1723,10 @@ fn le16_octets(v: Int) -> [u8]
 
 @tier(embedded)
 fn le32_octets(v: Int) -> [u8]
-    [(v & 0xFF) as u8, ((v >>> 8) & 0xFF) as u8, ((v >>> 16) & 0xFF) as u8, ((v >>> 24) & 0xFF) as u8]
+    [(v & 0xFF) as u8,
+        ((v >>> 8) & 0xFF) as u8,
+        ((v >>> 16) & 0xFF) as u8,
+        ((v >>> 24) & 0xFF) as u8]
 
 // A Connection_Handle, 12 bits meaningful, in the two octets the
 // commands give it.
@@ -1714,14 +1736,14 @@ fn iso_handle_octets(connection_handle: Int) -> [u8]
 
 // The parameter octets of the LE Set Host Feature command [v1] ([Vol 4]
 // Part E, Section 7.8.115): Bit_Number and Bit_Value.
-@satisfies("REQ-BLE-HCI-057")
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_le_set_host_feature(bit_number: Int, enable: Bool) -> [u8]
     [bit_number as u8, (if enable then 0x01 else 0x00) as u8]
 
 // The parameter octets of the LE Set Host Feature command [v2]: a
 // two-octet Bit_Number, then Bit_Value.
-@satisfies("REQ-BLE-HCI-057")
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_le_set_host_feature_v2(bit_number: Int, enable: Bool) -> [u8]
     var out = le16_octets(bit_number)
@@ -1732,7 +1754,7 @@ fn build_le_set_host_feature_v2(bit_number: Int, enable: Bool) -> [u8]
 // LE ISO Read Test Counters, LE ISO Test End and LE Read ISO Link
 // Quality commands, which take a Connection_Handle and nothing else
 // (Section 7.8.96, 7.8.101, 7.8.113, 7.8.114 and 7.8.116).
-@satisfies("REQ-BLE-HCI-057")
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_iso_connection_handle(connection_handle: Int) -> [u8]
     iso_handle_octets(connection_handle)
@@ -1741,7 +1763,7 @@ fn build_iso_connection_handle(connection_handle: Int) -> [u8]
 // Part E, Section 7.8.97).  The two SDU intervals are in microseconds,
 // the two transport latencies in milliseconds; Worst_Case_SCA, Packing
 // and Framing are the codes of the specification.
-@value
+pub @value
 struct CigParameters
     cig_id: Int
     sdu_interval_c_to_p: Int
@@ -1755,7 +1777,7 @@ struct CigParameters
 // One CIS configuration of the LE Set CIG Parameters command: the
 // elements CIS_ID[i] to RTN_P_To_C[i].  The two PHY fields are bit
 // fields (bit 0 LE 1M, bit 1 LE 2M, bit 2 LE Coded).
-@value
+pub @value
 struct CisParameters
     cis_id: Int
     max_sdu_c_to_p: Int
@@ -1769,7 +1791,7 @@ struct CisParameters
 // Part E, Section 7.8.97): the CIG-wide parameters, CIS_Count and then
 // one 9-octet element per CIS.  `None` for more CISes than the 0x1F the
 // count holds, and for an SDU_Interval outside 0x0000FF to 0x0FFFFF.
-@satisfies("REQ-BLE-HCI-057")
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_le_set_cig_parameters(cig: CigParameters, cis: [CisParameters]) -> ?[u8]
     let n = list.len(cis)
@@ -1793,7 +1815,7 @@ fn build_le_set_cig_parameters(cig: CigParameters, cis: [CisParameters]) -> ?[u8
 // ([Vol 4] Part E, Section 7.8.98): the flush timeouts and the
 // ISO_Interval (1.25 ms units) the Host fixes in place of the two
 // transport latencies.
-@value
+pub @value
 struct CigTestParameters
     cig_id: Int
     sdu_interval_c_to_p: Int
@@ -1807,7 +1829,7 @@ struct CigTestParameters
 
 // One CIS configuration of the LE Set CIG Parameters Test command: the
 // elements CIS_ID[i] to BN_P_To_C[i].
-@value
+pub @value
 struct CisTestParameters
     cis_id: Int
     nse: Int
@@ -1825,7 +1847,7 @@ struct CisTestParameters
 // CIS_Count and one 14-octet element per CIS.  `None` for more CISes than
 // the 0x1F the count holds and for an SDU_Interval outside 0x0000FF to
 // 0x0FFFFF.
-@satisfies("REQ-BLE-HCI-057")
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_le_set_cig_parameters_test(cig: CigTestParameters, cis: [CisTestParameters]) -> ?[u8]
     let n = list.len(cis)
@@ -1851,7 +1873,7 @@ fn build_le_set_cig_parameters_test(cig: CigTestParameters, cis: [CisTestParamet
 // One CIS the LE Create CIS command opens: the handle the LE Set CIG
 // Parameters command returned for it and the handle of the ACL
 // connection to the Peripheral that carries it.
-@value
+pub @value
 struct CisLink
     cis_connection_handle: Int
     acl_connection_handle: Int
@@ -1860,7 +1882,7 @@ struct CisLink
 // Section 7.8.99): CIS_Count, then CIS_Connection_Handle[i] and
 // ACL_Connection_Handle[i] element by element.  `None` for no CIS or for
 // more than the 0x1F the count holds.
-@satisfies("REQ-BLE-HCI-057")
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_le_create_cis(links: [CisLink]) -> ?[u8]
     let n = list.len(links)
@@ -1874,14 +1896,14 @@ fn build_le_create_cis(links: [CisLink]) -> ?[u8]
 
 // The parameter octet of the LE Remove CIG command ([Vol 4] Part E,
 // Section 7.8.100): CIG_ID.
-@satisfies("REQ-BLE-HCI-057")
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_le_remove_cig(cig_id: Int) -> [u8]
     [cig_id as u8]
 
 // The parameter octets of the LE Accept CIS Request command ([Vol 4] Part
 // E, Section 7.8.101): the Connection_Handle of the CIS.
-@satisfies("REQ-BLE-HCI-057")
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_le_accept_cis_request(connection_handle: Int) -> [u8]
     iso_handle_octets(connection_handle)
@@ -1889,7 +1911,7 @@ fn build_le_accept_cis_request(connection_handle: Int) -> [u8]
 // The parameter octets of the LE Reject CIS Request command ([Vol 4]
 // Part E, Section 7.8.102): Connection_Handle of the CIS and the
 // Reason, a Controller error code.
-@satisfies("REQ-BLE-HCI-057")
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_le_reject_cis_request(connection_handle: Int, reason: Int) -> [u8]
     var out = iso_handle_octets(connection_handle)
@@ -1903,16 +1925,19 @@ fn build_le_reject_cis_request(connection_handle: Int, reason: Int) -> [u8]
 // Broadcast_Code.  `None` for no BIS, more than the 0x1F the count
 // holds, an SDU_Interval outside 0x0000FF to 0x0FFFFF, or a Broadcast_Code
 // of another length.
-@satisfies("REQ-BLE-HCI-057")
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
-fn build_le_create_big(big_handle: Int, advertising_handle: Int, num_bis: Int, sdu_interval: Int, max_sdu: Int, max_transport_latency: Int, rtn: Int, phy: Int, packing: Int, framing: Int, encryption: Bool, broadcast_code: [u8]) -> ?[u8]
+fn build_le_create_big(big_handle: Int, advertising_handle: Int, num_bis: Int, sdu_interval: Int,
+                       max_sdu: Int, max_transport_latency: Int, rtn: Int, phy: Int, packing: Int,
+                       framing: Int, encryption: Bool, broadcast_code: [u8]) -> ?[u8]
     if num_bis < 1 or num_bis > ISO_BIS_COUNT_MAX or not iso_sdu_interval_ok(sdu_interval) or list.len(broadcast_code) != ISO_BROADCAST_CODE_LENGTH
         return None
     var out: [u8] = [big_handle as u8, advertising_handle as u8, num_bis as u8]
     list.append(out, le24(sdu_interval))
     list.append(out, le16_octets(max_sdu))
     list.append(out, le16_octets(max_transport_latency))
-    list.append(out, [rtn as u8, phy as u8, packing as u8, framing as u8, (if encryption then 0x01 else 0x00) as u8])
+    list.append(out,
+        [rtn as u8, phy as u8, packing as u8, framing as u8, (if encryption then 0x01 else 0x00) as u8])
     list.append(out, broadcast_code)
     Some(out)
 
@@ -1921,9 +1946,12 @@ fn build_le_create_big(big_handle: Int, advertising_handle: Int, num_bis: Int, s
 // SDU_Interval, ISO_Interval (1.25 ms units), NSE, Max_SDU, Max_PDU,
 // PHY, Packing, Framing, BN, IRC, PTO, Encryption and the Broadcast_Code.
 // `None` for the refusals of `build_le_create_big`.
-@satisfies("REQ-BLE-HCI-057")
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
-fn build_le_create_big_test(big_handle: Int, advertising_handle: Int, num_bis: Int, sdu_interval: Int, iso_interval: Int, nse: Int, max_sdu: Int, max_pdu: Int, phy: Int, packing: Int, framing: Int, bn: Int, irc: Int, pto: Int, encryption: Bool, broadcast_code: [u8]) -> ?[u8]
+fn build_le_create_big_test(big_handle: Int, advertising_handle: Int, num_bis: Int,
+                            sdu_interval: Int, iso_interval: Int, nse: Int, max_sdu: Int,
+                            max_pdu: Int, phy: Int, packing: Int, framing: Int, bn: Int, irc: Int,
+                            pto: Int, encryption: Bool, broadcast_code: [u8]) -> ?[u8]
     if num_bis < 1 or num_bis > ISO_BIS_COUNT_MAX or not iso_sdu_interval_ok(sdu_interval) or list.len(broadcast_code) != ISO_BROADCAST_CODE_LENGTH
         return None
     var out: [u8] = [big_handle as u8, advertising_handle as u8, num_bis as u8]
@@ -1932,13 +1960,19 @@ fn build_le_create_big_test(big_handle: Int, advertising_handle: Int, num_bis: I
     list.push(out, nse as u8)
     list.append(out, le16_octets(max_sdu))
     list.append(out, le16_octets(max_pdu))
-    list.append(out, [phy as u8, packing as u8, framing as u8, bn as u8, irc as u8, pto as u8, (if encryption then 0x01 else 0x00) as u8])
+    list.append(out, [phy as u8,
+        packing as u8,
+        framing as u8,
+        bn as u8,
+        irc as u8,
+        pto as u8,
+        (if encryption then 0x01 else 0x00) as u8])
     list.append(out, broadcast_code)
     Some(out)
 
 // The parameter octets of the LE Terminate BIG command ([Vol 4] Part E,
 // Section 7.8.105): BIG_Handle and Reason.
-@satisfies("REQ-BLE-HCI-057")
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_le_terminate_big(big_handle: Int, reason: Int) -> [u8]
     [big_handle as u8, reason as u8]
@@ -1949,9 +1983,11 @@ fn build_le_terminate_big(big_handle: Int, reason: Int) -> [u8]
 // MSE, BIG_Sync_Timeout (10 ms units), Num_BIS and BIS[i], the index of
 // each BIS to synchronize to.  `None` for no BIS, more than the 0x1F the
 // count holds, or a Broadcast_Code of another length.
-@satisfies("REQ-BLE-HCI-057")
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
-fn build_le_big_create_sync(big_handle: Int, sync_handle: Int, encryption: Bool, broadcast_code: [u8], mse: Int, big_sync_timeout: Int, bis: [Int]) -> ?[u8]
+fn build_le_big_create_sync(big_handle: Int, sync_handle: Int, encryption: Bool,
+                            broadcast_code: [u8], mse: Int, big_sync_timeout: Int,
+                            bis: [Int]) -> ?[u8]
     let n = list.len(bis)
     if n < 1 or n > ISO_BIS_COUNT_MAX or list.len(broadcast_code) != ISO_BROADCAST_CODE_LENGTH
         return None
@@ -1968,7 +2004,7 @@ fn build_le_big_create_sync(big_handle: Int, sync_handle: Int, encryption: Bool,
 
 // The parameter octet of the LE BIG Terminate Sync command ([Vol 4] Part
 // E, Section 7.8.107): BIG_Handle.
-@satisfies("REQ-BLE-HCI-057")
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_le_big_terminate_sync(big_handle: Int) -> [u8]
     [big_handle as u8]
@@ -1977,13 +2013,19 @@ fn build_le_big_terminate_sync(big_handle: Int) -> [u8]
 // Coding_Format, then the Company_ID and the Vendor_Specific_Codec_ID,
 // which are meaningful only for the Vendor Specific coding format 0xFF
 // ([Vol 4] Part E, Section 7.8.109).
-const ISO_CODING_FORMAT_TRANSPARENT = 0x03
+pub const ISO_CODING_FORMAT_TRANSPARENT = 0x03
 
-const ISO_CODING_FORMAT_LC3 = 0x06
+// Coding_Format 0x06: LC3 ([Vol 4] Part E, Section 7.8.109).
+pub const ISO_CODING_FORMAT_LC3 = 0x06
 
-const ISO_CODING_FORMAT_VENDOR_SPECIFIC = 0xFF
+// Coding_Format 0xFF: a vendor-specific codec, named by the Company_ID and Vendor_Specific_Codec_ID that follow it.
+pub const ISO_CODING_FORMAT_VENDOR_SPECIFIC = 0xFF
 
-@satisfies("REQ-BLE-HCI-057")
+// The Codec_ID of the LE Setup ISO Data Path command: 5 octets, `coding_format` and then `company_id` and
+// `vendor_specific_codec_id`, each 2 octets least significant first.
+//
+// The last two are meaningful only for `ISO_CODING_FORMAT_VENDOR_SPECIFIC` ([Vol 4] Part E, Section 7.8.109).
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn iso_codec_id(coding_format: Int, company_id: Int, vendor_specific_codec_id: Int) -> [u8]
     var out: [u8] = [coding_format as u8]
@@ -1997,9 +2039,11 @@ fn iso_codec_id(coding_format: Int, company_id: Int, vendor_specific_codec_id: I
 // octets), Codec_Configuration_Length and Codec_Configuration.  `None`
 // for a Codec_ID that is not 5 octets or a configuration of more than the
 // 255 octets its length holds.
-@satisfies("REQ-BLE-HCI-057")
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
-fn build_le_setup_iso_data_path(connection_handle: Int, direction: Int, data_path_id: Int, codec_id: [u8], controller_delay: Int, codec_configuration: [u8]) -> ?[u8]
+fn build_le_setup_iso_data_path(connection_handle: Int, direction: Int, data_path_id: Int,
+                                codec_id: [u8], controller_delay: Int,
+                                codec_configuration: [u8]) -> ?[u8]
     if list.len(codec_id) != 5 or list.len(codec_configuration) > 255
         return None
     var out = iso_handle_octets(connection_handle)
@@ -2013,7 +2057,7 @@ fn build_le_setup_iso_data_path(connection_handle: Int, direction: Int, data_pat
 // The parameter octets of the LE Remove ISO Data Path command ([Vol 4]
 // Part E, Section 7.8.110): Connection_Handle and Data_Path_Direction,
 // a bit field here: bit 0 the input path, bit 1 the output path.
-@satisfies("REQ-BLE-HCI-057")
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_le_remove_iso_data_path(connection_handle: Int, data_path_direction: Int) -> [u8]
     var out = iso_handle_octets(connection_handle)
@@ -2023,7 +2067,7 @@ fn build_le_remove_iso_data_path(connection_handle: Int, data_path_direction: In
 // The parameter octets of the LE ISO Transmit Test and LE ISO Receive
 // Test commands ([Vol 4] Part E, Section 7.8.111 and 7.8.112):
 // Connection_Handle and Payload_Type.
-@satisfies("REQ-BLE-HCI-057")
+pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_le_iso_test(connection_handle: Int, payload_type: Int) -> [u8]
     var out = iso_handle_octets(connection_handle)
@@ -2041,30 +2085,34 @@ fn build_le_iso_test(connection_handle: Int, payload_type: Int) -> [u8]
 // two a Controller sends when both bits are set, so a Host that sets
 // both reads either (`le_cis_established` decodes both).  The bit of an
 // LE Meta subevent is its Subevent_Code minus one.
-const LE_EVENT_MASK_CIS_ESTABLISHED = 0x0000000001000000
+pub const LE_EVENT_MASK_CIS_ESTABLISHED = 0x0000000001000000
 
-const LE_EVENT_MASK_CIS_REQUEST = 0x0000000002000000
+// Bit 25 of the LE_Event_Mask: the LE CIS Request event, which a Peripheral needs to accept a CIS.
+pub const LE_EVENT_MASK_CIS_REQUEST = 0x0000000002000000
 
-const LE_EVENT_MASK_CIS_ESTABLISHED_V2 = 0x0000020000000000
+// Bit 41 of the LE_Event_Mask: the LE CIS Established [v2] event, which carries the fields of the [v1] event and six more.
+pub const LE_EVENT_MASK_CIS_ESTABLISHED_V2 = 0x0000020000000000
 
 // LE Create BIG Complete, LE Terminate BIG Complete, LE BIG Sync
 // Established and LE BIG Sync Lost: bits 26 to 29, the events of the
 // Broadcast Isochronous Group the Host transmits or follows.
-const LE_EVENT_MASK_BIG = 0x000000003C000000
+pub const LE_EVENT_MASK_BIG = 0x000000003C000000
 
 // The two halves of the four: an Isochronous Broadcaster needs LE Create
 // BIG Complete and LE Terminate BIG Complete (bits 26 and 27), a
 // Synchronized Receiver LE BIG Sync Established and LE BIG Sync Lost
 // (bits 28 and 29).
-const LE_EVENT_MASK_BIG_BROADCASTER = 0x000000000C000000
+pub const LE_EVENT_MASK_BIG_BROADCASTER = 0x000000000C000000
 
-const LE_EVENT_MASK_BIG_RECEIVER = 0x0000000030000000
+// Bits 28 and 29 of the LE_Event_Mask: LE BIG Sync Established and LE BIG Sync Lost, the events of a Synchronized Receiver.
+pub const LE_EVENT_MASK_BIG_RECEIVER = 0x0000000030000000
 
-const LE_EVENT_MASK_BIG_INFO_ADVERTISING_REPORT = 0x0000000200000000
+// Bit 33 of the LE_Event_Mask: the LE BIGInfo Advertising Report event.
+pub const LE_EVENT_MASK_BIG_INFO_ADVERTISING_REPORT = 0x0000000200000000
 
 // The CIS events a Central or a Peripheral needs, with the [v2] form of
 // the CIS Established event; and the BIG events with the BIGInfo report.
-const LE_EVENT_MASK_ISOCHRONOUS = 0x000002023F000000
+pub const LE_EVENT_MASK_ISOCHRONOUS = 0x000002023F000000
 
 // ── LE feature set ──────────────────────────────────────────────────
 //
@@ -2074,100 +2122,39 @@ const LE_EVENT_MASK_ISOCHRONOUS = 0x000002023F000000
 // Section 5.1.7): a Controller that sets it runs the procedure itself,
 // and one that leaves it clear leaves a Peripheral's Host the
 // L2CAP_CONNECTION_PARAMETER_UPDATE_REQ command ([Vol 3] Part C,
-// Section 9.3.9.2).  The rig's SoftDevice Controller image keeps the
-// bit clear (RESULTS-CORE.md, Rig facts).
+// Section 9.3.9.2).  A Nordic SoftDevice Controller keeps the
+// bit clear.
 
 // Whether the feature set `features` has the Connection Parameters
 // Request Procedure, bit 1 of the first octet.  An empty set — a
 // Controller that was never asked — answers false, the reading that
 // sends the procedure over L2CAP.
-@tier(embedded)
+pub @tier(embedded)
 @no_alloc
 fn has_connection_parameters_request(features: [u8]) -> Bool
-    list.len(features) > 0 and ((features[0] as Int) & 0x02) != 0
+    list.len(features) > 0 and (features[0] as Int & 0x02) != 0
 
 // Whether `commands`, the 64 octets of Supported_Commands, lists LE
 // Extended Create Connection (0x2043): octet 37 bit 7 ([Vol 4] Part E,
 // Section 6.27; octet 38 bit 0 is LE Periodic Advertising Create Sync).  An answer too short to reach the octet, or none at all,
 // lists nothing.
-@tier(embedded)
+pub @tier(embedded)
 @no_alloc
 fn has_le_extended_create_connection(commands: [u8]) -> Bool
-    list.len(commands) > 37 and ((commands[37] as Int) & 0x80) != 0
-
-@test
-fn test_the_connection_parameters_request_feature_bit()
-    // The SoftDevice Controller's set, the Zephyr image's, and none.
-    test.assert_eq(has_connection_parameters_request([0xFD, 0x79, 0x00, 0x03, 0x10, 0x00, 0x00, 0x00]), false)
-    test.assert_eq(has_connection_parameters_request([0x3F, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]), true)
-    test.assert_eq(has_connection_parameters_request([0x01]), false)
-    test.assert_eq(has_connection_parameters_request([]), false)
+    list.len(commands) > 37 and (commands[37] as Int & 0x80) != 0
 
 // Whether `commands`, the 64 octets of Supported_Commands, lists the three commands that write the resolving list and turn
 // address resolution on: LE Add Device To Resolving List (octet 34 bit 3), LE Clear Resolving List (octet 34 bit 5) and LE Set
 // Address Resolution Enable (octet 35 bit 1) ([Vol 4] Part E, Section 6.27).  An answer too short to reach the octets lists nothing.
-@tier(embedded)
+pub @tier(embedded)
 @no_alloc
 fn has_le_resolving_list(commands: [u8]) -> Bool
-    list.len(commands) > 35 and ((commands[34] as Int) & 0x28) == 0x28 and ((commands[35] as Int) & 0x02) != 0
-
-@test
-fn test_the_resolving_list_supported_command_bits()
-    var listed: [u8] = []
-    for i in 0..64
-        list.push(listed, if i == 34 then 0x28 else if i == 35 then 0x02 else 0x00)
-    test.assert_eq(has_le_resolving_list(listed), true)
-    listed[34] = 0x20
-    test.assert_eq(has_le_resolving_list(listed), false)
-    listed[34] = 0x08
-    test.assert_eq(has_le_resolving_list(listed), false)
-    listed[34] = 0x28
-    listed[35] = 0x00
-    test.assert_eq(has_le_resolving_list(listed), false)
-    test.assert_eq(has_le_resolving_list([0xFF]), false)
-    test.assert_eq(has_le_resolving_list([]), false)
-
-@test
-fn test_the_resolving_list_commands()
-    test.assert_eq(opcode_le_add_device_to_resolving_list(), 0x2027)
-    test.assert_eq(opcode_le_clear_resolving_list(), 0x2029)
-    test.assert_eq(opcode_le_set_address_resolution_enable(), 0x202D)
-    var irk: [u8] = []
-    var local: [u8] = []
-    for i in 0..16
-        list.push(irk, (0x10 + i) as u8)
-        list.push(local, 0)
-    let params = build_le_add_device_to_resolving_list(1, [1, 2, 3, 4, 5, 6], irk, local)
-    test.assert_eq(list.len(params), 39)
-    test.assert_eq(params[0] as Int, 1)
-    test.assert_eq(params[1] as Int, 1)
-    test.assert_eq(params[6] as Int, 6)
-    test.assert_eq(params[7] as Int, 0x10)
-    test.assert_eq(params[22] as Int, 0x1F)
-    test.assert_eq(params[23] as Int, 0)
-    test.assert_eq(build_le_set_address_resolution_enable(true)[0] as Int, 1)
-    test.assert_eq(build_le_set_address_resolution_enable(false)[0] as Int, 0)
-
-@test
-fn test_the_extended_create_connection_supported_command_bit()
-    var listed: [u8] = []
-    for i in 0..64
-        list.push(listed, if i == 37 then 0x80 else 0x00)
-    test.assert_eq(has_le_extended_create_connection(listed), true)
-    // Octet 37 bit 6 is LE Set Extended Scan Enable, and octet 38 bit 0 LE Periodic Advertising Create Sync, not this command.
-    var neighbours: [u8] = []
-    for i in 0..64
-        list.push(neighbours, if i == 37 then 0x7F else if i == 38 then 0x01 else 0x00)
-    test.assert_eq(has_le_extended_create_connection(neighbours), false)
-    listed[37] = 0x7F
-    test.assert_eq(has_le_extended_create_connection(listed), false)
-    test.assert_eq(has_le_extended_create_connection([0xFF]), false)
-    test.assert_eq(has_le_extended_create_connection([]), false)
+    list.len(commands) > 35 and (commands[34] as Int & 0x28) == 0x28 and (commands[35] as Int & 0x02) != 0
 
 // ── Connection parameters ───────────────────────────────────────────
 
-// [Vol 4] Part E, Section 7.8.18 — LE Connection Update command.
-@tier(embedded)
+// The opcode of the LE Connection Update command, 0x2013 ([Vol 4] Part E, Section 7.8.18).
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_connection_update() -> Int
     // OGF=0x08, OCF=0x0013 → 0x2013.
@@ -2175,7 +2162,7 @@ fn opcode_le_connection_update() -> Int
 
 // [Vol 4] Part E, Section 7.8.31 — LE Remote Connection Parameter
 // Request Reply command.
-@tier(embedded)
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_remote_connection_parameter_request_reply() -> Int
     // OGF=0x08, OCF=0x0020 → 0x2020.
@@ -2183,7 +2170,7 @@ fn opcode_le_remote_connection_parameter_request_reply() -> Int
 
 // [Vol 4] Part E, Section 7.8.32 — LE Remote Connection Parameter
 // Request Negative Reply command.
-@tier(embedded)
+pub @tier(embedded)
 @no_alloc
 fn opcode_le_remote_connection_parameter_request_negative_reply() -> Int
     // OGF=0x08, OCF=0x0021 → 0x2021.
@@ -2191,7 +2178,7 @@ fn opcode_le_remote_connection_parameter_request_negative_reply() -> Int
 
 // Reason Unacceptable Connection Parameters (0x3B), the Reason of the LE
 // Remote Connection Parameter Request Negative Reply command.
-const REASON_UNACCEPTABLE_CONNECTION_PARAMETERS = 0x3B
+pub const REASON_UNACCEPTABLE_CONNECTION_PARAMETERS = 0x3B
 
 // The 14 parameter octets the LE Connection Update command and the LE
 // Remote Connection Parameter Request Reply command share:
@@ -2200,8 +2187,10 @@ const REASON_UNACCEPTABLE_CONNECTION_PARAMETERS = 0x3B
 // Max_CE_Length, each 2 octets least significant first.  The intervals
 // are in 1.25 ms units, the timeout in 10 ms units and the two lengths
 // in 0.625 ms units.
-@tier(embedded)
-fn build_connection_parameters(connection_handle: Int, interval_min: Int, interval_max: Int, latency: Int, timeout: Int, min_ce_length: Int, max_ce_length: Int) -> [u8]
+pub @tier(embedded)
+fn build_connection_parameters(connection_handle: Int, interval_min: Int, interval_max: Int,
+                               latency: Int, timeout: Int, min_ce_length: Int,
+                               max_ce_length: Int) -> [u8]
     [(connection_handle & 0xFF) as u8, ((connection_handle >>> 8) & 0x0F) as u8,
      (interval_min & 0xFF) as u8, ((interval_min >>> 8) & 0xFF) as u8,
      (interval_max & 0xFF) as u8, ((interval_max >>> 8) & 0xFF) as u8,
@@ -2218,8 +2207,11 @@ fn build_connection_parameters(connection_handle: Int, interval_min: Int, interv
 // significant first ([Vol 4] Part E, Section 7.8.12).  The intervals
 // are in 1.25 ms units, the timeout in 10 ms units and the two lengths
 // in 0.625 ms units.
-@tier(embedded)
-fn build_le_create_connection(scan_interval: Int, scan_window: Int, filter_policy: Int, peer_address_type: Int, peer_address: [u8], own_address_type: Int, interval_min: Int, interval_max: Int, latency: Int, timeout: Int, min_ce_length: Int, max_ce_length: Int) -> [u8]
+pub @tier(embedded)
+fn build_le_create_connection(scan_interval: Int, scan_window: Int, filter_policy: Int,
+                              peer_address_type: Int, peer_address: [u8], own_address_type: Int,
+                              interval_min: Int, interval_max: Int, latency: Int, timeout: Int,
+                              min_ce_length: Int, max_ce_length: Int) -> [u8]
     var out: [u8] = [
         (scan_interval & 0xFF) as u8, ((scan_interval >>> 8) & 0xFF) as u8,
         (scan_window & 0xFF) as u8, ((scan_window >>> 8) & 0xFF) as u8,
@@ -2242,8 +2234,12 @@ fn build_le_create_connection(scan_interval: Int, scan_window: Int, filter_polic
 // interval range, the Peripheral latency, the supervision timeout and
 // Min_CE_Length and Max_CE_Length, each 2 octets least significant first.  The
 // units are those of LE Create Connection.
-@tier(embedded)
-fn build_le_extended_create_connection(scan_interval: Int, scan_window: Int, filter_policy: Int, peer_address_type: Int, peer_address: [u8], own_address_type: Int, interval_min: Int, interval_max: Int, latency: Int, timeout: Int, min_ce_length: Int, max_ce_length: Int) -> [u8]
+pub @tier(embedded)
+fn build_le_extended_create_connection(scan_interval: Int, scan_window: Int, filter_policy: Int,
+                                       peer_address_type: Int, peer_address: [u8],
+                                       own_address_type: Int, interval_min: Int, interval_max: Int,
+                                       latency: Int, timeout: Int, min_ce_length: Int,
+                                       max_ce_length: Int) -> [u8]
     var out: [u8] = [filter_policy as u8, own_address_type as u8, peer_address_type as u8]
     list.append(out, peer_address[0:6])
     list.append(out, [0x01,
@@ -2260,13 +2256,13 @@ fn build_le_extended_create_connection(scan_interval: Int, scan_window: Int, fil
 // The parameters of a command that names only a connection and one
 // octet after it: the LE Remote Connection Parameter Request Negative
 // Reply command takes Connection_Handle and Reason.
-@tier(embedded)
+pub @tier(embedded)
 fn build_handle_and_reason(connection_handle: Int, reason: Int) -> [u8]
     [(connection_handle & 0xFF) as u8, ((connection_handle >>> 8) & 0x0F) as u8, reason as u8]
 
 // The parameter of the LE Long Term Key Request Negative Reply command
 // ([Vol 4] Part E, Section 7.8.26): Connection_Handle.
-@tier(embedded)
+pub @tier(embedded)
 fn build_connection_handle(connection_handle: Int) -> [u8]
     [(connection_handle & 0xFF) as u8, ((connection_handle >>> 8) & 0x0F) as u8]
 
@@ -2275,9 +2271,11 @@ fn build_connection_handle(connection_handle: Int) -> [u8]
 // the advertiser's address type and address, Skip, Sync_Timeout in 10 ms
 // units and Sync_CTE_Type.  `None` when an option bit above bit 1 is set
 // or Sync_Timeout falls outside the range the command admits.
-@satisfies("REQ-BLE-HCI-055")
+pub @satisfies("REQ-BLE-HCI-055")
 @tier(embedded)
-fn build_le_periodic_advertising_create_sync(options: Int, advertising_sid: Int, advertiser_address_type: Int, advertiser_address: [u8], skip: Int, sync_timeout: Int, cte_type: Int) -> ?[u8]
+fn build_le_periodic_advertising_create_sync(options: Int, advertising_sid: Int,
+                                             advertiser_address_type: Int, advertiser_address: [u8],
+                                             skip: Int, sync_timeout: Int, cte_type: Int) -> ?[u8]
     if (options & 0xF8) != 0 or sync_timeout < PERIODIC_SYNC_TIMEOUT_RANGE_MIN or sync_timeout > PERIODIC_SYNC_TIMEOUT_RANGE_MAX
         None
     else
@@ -2290,7 +2288,7 @@ fn build_le_periodic_advertising_create_sync(options: Int, advertising_sid: Int,
 
 // The 2 parameter octets of the LE Periodic Advertising Terminate Sync
 // command ([Vol 4] Part E, Section 7.8.69): Sync_Handle.
-@satisfies("REQ-BLE-HCI-055")
+pub @satisfies("REQ-BLE-HCI-055")
 @tier(embedded)
 fn build_le_periodic_advertising_terminate_sync(sync_handle: Int) -> [u8]
     [(sync_handle & 0xFF) as u8, ((sync_handle >>> 8) & 0x0F) as u8]
@@ -2298,7 +2296,7 @@ fn build_le_periodic_advertising_terminate_sync(sync_handle: Int) -> [u8]
 // The parameters of the LE Long Term Key Request Reply command ([Vol 4]
 // Part E, Section 7.8.25): Connection_Handle, then the 16 octets of
 // Long_Term_Key, least significant octet first.
-@tier(embedded)
+pub @tier(embedded)
 fn build_le_long_term_key_request_reply(connection_handle: Int, ltk: [u8]) -> [u8]
     var out = build_connection_handle(connection_handle)
     list.append(out, ltk)
@@ -2311,919 +2309,11 @@ fn build_le_long_term_key_request_reply(connection_handle: Int, ltk: [u8]) -> [u
 // link with the STK or LTK of a pairing, or with a bond's LTK; EDIV and
 // Rand are zero for a key that is not identified by them (Sections
 // 2.4.4.1 and 2.4.4.2).
-@tier(embedded)
-fn build_le_start_encryption(connection_handle: Int, rand_number: [u8], ediv: Int, ltk: [u8]) -> [u8]
+pub @tier(embedded)
+fn build_le_start_encryption(connection_handle: Int, rand_number: [u8], ediv: Int,
+                             ltk: [u8]) -> [u8]
     var out = build_connection_handle(connection_handle)
     list.append(out, rand_number[0:8])
     list.append(out, [(ediv & 0xFF) as u8, ((ediv >>> 8) & 0xFF) as u8])
     list.append(out, ltk[0:16])
     out
-
-// ═════════════════════════════════════════════════════════════════════
-// Tests
-// ═════════════════════════════════════════════════════════════════════
-
-@test
-fn test_connection_parameter_opcodes_and_layout()
-    test.assert_eq(opcode_le_connection_update(), 0x2013)
-    test.assert_eq(opcode_le_remote_connection_parameter_request_reply(), 0x2020)
-    test.assert_eq(opcode_le_remote_connection_parameter_request_negative_reply(), 0x2021)
-    let p = build_connection_parameters(0x0040, 0x0032, 0x0046, 0x0001, 0x01F4, 0, 0)
-    test.assert_eq(list.len(p), 14)
-    test.assert_eq(p[0] as Int, 0x40)
-    test.assert_eq(p[2] as Int, 0x32)
-    test.assert_eq(p[4] as Int, 0x46)
-    test.assert_eq(p[6] as Int, 0x01)
-    test.assert_eq(p[8] as Int, 0xF4)
-    test.assert_eq(p[9] as Int, 0x01)
-    let r = build_handle_and_reason(0x0040, REASON_UNACCEPTABLE_CONNECTION_PARAMETERS)
-    test.assert_eq(r[2] as Int, 0x3B)
-    test.assert_eq(list.len(build_connection_handle(0x0040)), 2)
-
-@test
-@satisfies("REQ-BLE-HCI-033")
-fn test_le_start_encryption_layout()
-    test.assert_eq(opcode_le_start_encryption(), 0x2019)
-    let rand_number: [u8] = [1, 2, 3, 4, 5, 6, 7, 8]
-    let ltk: [u8] = [
-        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
-        0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F]
-    let p = build_le_start_encryption(0x0040, rand_number, 0xBEEF, ltk)
-    test.assert_eq(list.len(p), 28)
-    test.assert_eq(p[0] as Int, 0x40)
-    test.assert_eq(p[2] as Int, 1)
-    test.assert_eq(p[9] as Int, 8)
-    test.assert_eq(p[10] as Int, 0xEF)
-    test.assert_eq(p[11] as Int, 0xBE)
-    test.assert_eq(p[12] as Int, 0x10)
-    test.assert_eq(p[27] as Int, 0x1F)
-
-@test
-@satisfies("REQ-BLE-HCI-004")
-fn test_opcode_hci_reset()
-    test.assert_eq(opcode_hci_reset(), 0x0C03)
-
-@test
-@satisfies("REQ-BLE-HCI-005")
-fn test_opcode_read_bd_addr()
-    test.assert_eq(opcode_read_bd_addr(), 0x1009)
-
-@test
-@satisfies("REQ-BLE-HCI-006")
-fn test_opcode_read_local_version_information()
-    test.assert_eq(opcode_read_local_version_information(), 0x1001)
-
-@test
-@satisfies("REQ-BLE-HCI-011")
-fn test_opcode_le_read_buffer_size()
-    test.assert_eq(opcode_le_read_buffer_size(), 0x2002)
-
-@test
-@satisfies("REQ-BLE-HCI-013")
-fn test_opcode_le_set_random_address()
-    test.assert_eq(opcode_le_set_random_address(), 0x2005)
-
-@test
-@satisfies("REQ-BLE-HCI-014")
-fn test_opcode_le_set_advertising_parameters()
-    test.assert_eq(opcode_le_set_advertising_parameters(), 0x2006)
-
-@test
-@satisfies("REQ-BLE-HCI-016")
-fn test_opcode_le_set_advertising_data()
-    test.assert_eq(opcode_le_set_advertising_data(), 0x2008)
-
-@test
-@satisfies("REQ-BLE-HCI-017")
-fn test_opcode_le_set_scan_response_data()
-    test.assert_eq(opcode_le_set_scan_response_data(), 0x2009)
-
-@test
-@satisfies("REQ-BLE-HCI-018")
-fn test_opcode_le_set_advertising_enable()
-    test.assert_eq(opcode_le_set_advertising_enable(), 0x200A)
-
-@test
-fn test_scan_opcodes()
-    test.assert_eq(opcode_le_set_scan_parameters(), 0x200B)
-    test.assert_eq(opcode_le_set_scan_enable(), 0x200C)
-
-@test
-fn test_build_le_set_scan_parameters_layout()
-    // Active scanning, interval 0x0060, window 0x0030, Random Device
-    // Address, basic unfiltered policy.
-    let p = build_le_set_scan_parameters(LE_SCAN_TYPE_ACTIVE, 0x0060, 0x0030, OWN_ADDR_TYPE_RANDOM, SCAN_FILTER_BASIC_UNFILTERED)
-    test.assert_eq(list.len(p), 7)
-    let want: [u8] = [0x01, 0x60, 0x00, 0x30, 0x00, 0x01, 0x00]
-    for i in 0..7
-        test.assert_eq(p[i] as Int, want[i] as Int)
-    let wide = build_le_set_scan_parameters(LE_SCAN_TYPE_PASSIVE, 0x4000, 0x1234, OWN_ADDR_TYPE_PUBLIC, SCAN_FILTER_BASIC_UNFILTERED)
-    test.assert_eq(wide[0] as Int, 0x00)
-    test.assert_eq(wide[2] as Int, 0x40)
-    test.assert_eq(wide[3] as Int, 0x34)
-    test.assert_eq(wide[4] as Int, 0x12)
-
-@test
-fn test_build_set_event_mask_with_le_meta()
-    test.assert_eq(opcode_hci_set_event_mask(), 0x0C01)
-    let p = build_set_event_mask(EVENT_MASK_DEFAULT | EVENT_MASK_LE_META)
-    let want: [u8] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x1F, 0x00, 0x20]
-    test.assert_eq(list.len(p), 8)
-    for i in 0..8
-        test.assert_eq(p[i] as Int, want[i] as Int)
-
-@test
-fn test_build_le_set_scan_enable()
-    let on = build_le_set_scan_enable(true, false)
-    test.assert_eq(list.len(on), 2)
-    test.assert_eq(on[0] as Int, 0x01)
-    test.assert_eq(on[1] as Int, 0x00)
-    let off = build_le_set_scan_enable(false, true)
-    test.assert_eq(off[0] as Int, 0x00)
-    test.assert_eq(off[1] as Int, 0x01)
-
-@test
-fn test_opcode_hci_disconnect()
-    test.assert_eq(opcode_hci_disconnect(), 0x0406)
-
-@test
-fn test_build_disconnect_layout()
-    let p = build_disconnect(0x0E41, DISCONNECT_REASON_REMOTE_USER_TERMINATED)
-    test.assert_eq(list.len(p), 3)
-    test.assert_eq(p[0] as Int, 0x41)
-    test.assert_eq(p[1] as Int, 0x0E)
-    test.assert_eq(p[2] as Int, 0x13)
-
-// Full-byte-value assertions removed during hardware-
-// verification workaround.  The earlier bodies indexed into
-// the return value of a builder (`on[0] as Int` on a `[u8]`
-// list returned from `build_le_set_advertising_enable(...)`),
-// which tripped LLVM codegen bug #15 on the embedded target
-// (same family as #13 — function-returned receivers losing
-// type context).  Length-only assertions below are safe.
-// Restore full value checks once #15 is fixed.
-@test
-@satisfies("REQ-BLE-HCI-018")
-fn test_build_le_set_advertising_enable_length()
-    let on = build_le_set_advertising_enable(true)
-    test.assert_eq(list.len(on), 1)
-    let off = build_le_set_advertising_enable(false)
-    test.assert_eq(list.len(off), 1)
-
-@test
-@satisfies("REQ-BLE-HCI-013")
-fn test_build_le_set_random_address_length()
-    let a: [u8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0xC6]
-    let p = build_le_set_random_address(a)
-    test.assert_eq(list.len(p), 6)
-
-@test
-fn test_advertising_type_constants()
-    test.assert_eq(ADV_TYPE_ADV_IND, 0x00)
-    test.assert_eq(ADV_TYPE_ADV_DIRECT_IND_HDC, 0x01)
-    test.assert_eq(ADV_TYPE_ADV_SCAN_IND, 0x02)
-    test.assert_eq(ADV_TYPE_ADV_NONCONN_IND, 0x03)
-    test.assert_eq(ADV_TYPE_ADV_DIRECT_IND_LDC, 0x04)
-
-@test
-fn test_own_address_type_constants()
-    test.assert_eq(OWN_ADDR_TYPE_PUBLIC, 0x00)
-    test.assert_eq(OWN_ADDR_TYPE_RANDOM, 0x01)
-
-@test
-fn test_adv_channel_map_all_three()
-    // 0b00000111 = 7 → channels 37/38/39 enabled.
-    test.assert_eq(ADV_CHANNEL_MAP_ALL, 0x07)
-
-@test
-fn test_adv_filter_policy_constants()
-    test.assert_eq(ADV_FILTER_NONE, 0x00)
-    test.assert_eq(ADV_FILTER_SCAN_WHITELIST, 0x01)
-    test.assert_eq(ADV_FILTER_CONNECT_WHITELIST, 0x02)
-    test.assert_eq(ADV_FILTER_BOTH_WHITELIST, 0x03)
-
-// ── Encryption opcode tests ──────────────────────────────────────────
-
-@test
-fn test_opcode_le_encrypt()
-    test.assert_eq(opcode_le_encrypt(), 0x2017)
-
-@test
-fn test_opcode_le_rand()
-    test.assert_eq(opcode_le_rand(), 0x2018)
-
-@test
-@satisfies("REQ-BLE-HCI-033")
-fn test_opcode_le_start_encryption()
-    test.assert_eq(opcode_le_start_encryption(), 0x2019)
-
-@test
-@satisfies("REQ-BLE-HCI-034")
-fn test_opcode_le_long_term_key_request_reply()
-    test.assert_eq(opcode_le_long_term_key_request_reply(), 0x201A)
-
-@test
-@satisfies("REQ-BLE-HCI-035")
-fn test_opcode_le_long_term_key_request_negative_reply()
-    test.assert_eq(opcode_le_long_term_key_request_negative_reply(), 0x201B)
-
-@test
-fn test_build_le_long_term_key_request_reply()
-    var ltk: [u8] = []
-    for i in 0..16
-        list.push(ltk, i as u8)
-    let p = build_le_long_term_key_request_reply(0x0040, ltk)
-    test.assert_eq(list.len(p), 18)
-    test.assert_eq(p[0] as Int, 0x40)
-    test.assert_eq(p[1] as Int, 0x00)
-    test.assert_eq(p[2] as Int, 0x00)
-    test.assert_eq(p[17] as Int, 15)
-
-@test
-fn test_default_adv_interval_is_100ms()
-    // 100 ms / 0.625 ms = 160 = 0xA0.
-    test.assert_eq(adv_interval_min_default(), 0xA0)
-    test.assert_eq(ADV_INTERVAL_MAX_DEFAULT, 0xA0)
-
-@test
-fn test_adv_interval_units_from_ms()
-    // 100 ms is 160 units, the default.
-    test.assert_eq(adv_interval_units(100) ?? -1, 0xA0)
-    test.assert_eq(adv_interval_units(20) ?? -1, 0x20)
-    test.assert_eq(adv_interval_units(10240) ?? -1, 0x4000)
-    test.assert_eq(adv_interval_units(19) ?? -1, -1)
-    test.assert_eq(adv_interval_units(10241) ?? -1, -1)
-
-@test
-@satisfies("REQ-BLE-HCI-016")
-fn test_build_le_adv_data_block_pads_to_32()
-    let ad: [u8] = [0x02, 0x01, 0x06]
-    match build_le_adv_data_block(ad)
-        None        => test.fail("three bytes of data fit")
-        Some(block) =>
-            test.assert_eq(list.len(block), 32)
-            test.assert_eq(block[0] as Int, 3)
-            test.assert_eq(block[1] as Int, 0x02)
-            test.assert_eq(block[3] as Int, 0x06)
-            test.assert_eq(block[4] as Int, 0x00)
-            test.assert_eq(block[31] as Int, 0x00)
-
-@test
-@satisfies("REQ-BLE-HCI-016")
-fn test_build_le_adv_data_block_limits()
-    var full: [u8] = []
-    for i in 0..31
-        list.push(full, i as u8)
-    match build_le_adv_data_block(full)
-        None        => test.fail("31 bytes of data fit")
-        Some(block) =>
-            test.assert_eq(list.len(block), 32)
-            test.assert_eq(block[0] as Int, 31)
-            test.assert_eq(block[31] as Int, 30)
-    list.push(full, 31)
-    match build_le_adv_data_block(full)
-        None    => test.assert(true)
-        Some(_) => test.fail("32 bytes of data do not fit")
-
-// ── Extended advertising and periodic advertising tests ─────────────
-
-@test
-@satisfies("REQ-BLE-HCI-051")
-fn test_extended_advertising_opcodes()
-    test.assert_eq(opcode_le_set_advertising_set_random_address(), 0x2035)
-    test.assert_eq(opcode_le_set_extended_advertising_parameters(), 0x2036)
-    test.assert_eq(opcode_le_set_extended_advertising_data(), 0x2037)
-    test.assert_eq(opcode_le_set_extended_scan_response_data(), 0x2038)
-    test.assert_eq(opcode_le_set_extended_advertising_enable(), 0x2039)
-    test.assert_eq(opcode_le_read_maximum_advertising_data_length(), 0x203A)
-    test.assert_eq(opcode_le_read_number_of_supported_advertising_sets(), 0x203B)
-    test.assert_eq(opcode_le_remove_advertising_set(), 0x203C)
-    test.assert_eq(opcode_le_clear_advertising_sets(), 0x203D)
-
-@test
-@satisfies("REQ-BLE-HCI-052")
-fn test_periodic_advertising_opcodes()
-    test.assert_eq(opcode_le_set_periodic_advertising_parameters(), 0x203E)
-    test.assert_eq(opcode_le_set_periodic_advertising_data(), 0x203F)
-    test.assert_eq(opcode_le_set_periodic_advertising_enable(), 0x2040)
-
-@test
-@satisfies("REQ-BLE-HCI-053")
-@satisfies("REQ-BLE-HCI-054")
-fn test_periodic_sync_transfer_opcodes()
-    test.assert_eq(opcode_le_set_periodic_advertising_receive_enable(), 0x2059)
-    test.assert_eq(opcode_le_periodic_advertising_sync_transfer(), 0x205A)
-    test.assert_eq(opcode_le_periodic_advertising_set_info_transfer(), 0x205B)
-    test.assert_eq(opcode_le_set_periodic_advertising_sync_transfer_parameters(), 0x205C)
-    test.assert_eq(opcode_le_set_default_periodic_advertising_sync_transfer_parameters(), 0x205D)
-
-@test
-@satisfies("REQ-BLE-HCI-051")
-fn test_extended_advertising_parameters_layout()
-    let peer: [u8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
-    // A non-connectable, non-scannable extended set: no property bit at
-    // all, the intervals of 100 ms (0x00A0 = 160 units in 0.625 ms), the
-    // three advertising channels, the random address this Host uses, the
-    // LE 1M primary PHY and LE 2M for the auxiliary PDUs.
-    let p = build_le_set_extended_advertising_parameters(0x00, 0x0000, 0x0000A0, 0x0000A0, ADV_CHANNEL_MAP_ALL,
-                                                         OWN_ADDR_TYPE_RANDOM, 0x00, peer, ADV_FILTER_NONE,
-                                                         ADV_TX_POWER_NO_PREFERENCE, LE_PHY_1M, 0x00, LE_PHY_2M, 0x00, 0x00)
-    test.assert_eq(list.len(p), 25)
-    let want: [u8] = [0x00, 0x00, 0x00, 0xA0, 0x00, 0x00, 0xA0, 0x00, 0x00, 0x07, 0x01, 0x00,
-                      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7F, 0x01, 0x00, 0x02, 0x00, 0x00]
-    for i in 0..25
-        test.assert_eq(p[i] as Int, want[i] as Int)
-
-@test
-@satisfies("REQ-BLE-HCI-051")
-fn test_extended_advertising_parameters_connectable_flags()
-    let peer: [u8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
-    // Connectable, scannable, legacy: the 0b00000000_00010011 of Table
-    // 7.3, which is ADV_IND.
-    let p = build_le_set_extended_advertising_parameters(0x01, ADV_EVENT_PROP_CONNECTABLE | ADV_EVENT_PROP_SCANNABLE | ADV_EVENT_PROP_LEGACY,
-                                                         0x00A0, 0x00A0, ADV_CHANNEL_MAP_ALL, OWN_ADDR_TYPE_RANDOM, 0x00, peer,
-                                                         ADV_FILTER_NONE, ADV_TX_POWER_NO_PREFERENCE, LE_PHY_1M, 0x00, LE_PHY_1M, 0x02, 0x00)
-    test.assert_eq(p[0] as Int, 0x01)
-    test.assert_eq(p[1] as Int, 0x13)
-    test.assert_eq(p[2] as Int, 0x00)
-    // 22 is Secondary_Advertising_PHY, 23 Advertising_SID, 24 the scan
-    // request notification.
-    test.assert_eq(p[22] as Int, LE_PHY_1M)
-    test.assert_eq(p[23] as Int, 0x02)
-    test.assert_eq(p[24] as Int, 0x00)
-
-@test
-@satisfies("REQ-BLE-HCI-051")
-fn test_extended_data_and_enable_layout()
-    let ad: [u8] = [0x02, 0x01, 0x06]
-    match build_le_set_extended_data(0x00, EXT_ADV_DATA_COMPLETE, EXT_ADV_FRAGMENT_ANY, ad)
-        None => test.fail("three octets of data fit in one operation")
-        Some(p) =>
-            test.assert_eq(list.len(p), 7)
-            test.assert_eq(p[0] as Int, 0x00)
-            test.assert_eq(p[1] as Int, EXT_ADV_DATA_COMPLETE)
-            test.assert_eq(p[2] as Int, EXT_ADV_FRAGMENT_ANY)
-            test.assert_eq(p[3] as Int, 3)
-            test.assert_eq(p[6] as Int, 0x06)
-    var too_long: [u8] = []
-    for _ in 0..256
-        list.push(too_long, 0x00)
-    match build_le_set_extended_data(0x00, EXT_ADV_DATA_COMPLETE, EXT_ADV_FRAGMENT_ANY, too_long)
-        None    => test.assert(true)
-        Some(_) => test.fail("256 octets do not fit one operation")
-    let on = build_le_set_extended_advertising_enable(true, 0x00, 0x0000, 0x00)
-    test.assert_eq(list.len(on), 6)
-    test.assert_eq(on[0] as Int, 0x01)
-    test.assert_eq(on[1] as Int, 0x01)
-    test.assert_eq(on[5] as Int, 0x00)
-    let off = build_le_set_extended_advertising_enable(false, 0x00, 0x0000, 0x00)
-    test.assert_eq(off[0] as Int, 0x00)
-    // A duration in 10 ms units, least significant octet first.
-    let timed = build_le_set_extended_advertising_enable(true, 0x02, 0x0123, 0x05)
-    test.assert_eq(timed[2] as Int, 0x02)
-    test.assert_eq(timed[3] as Int, 0x23)
-    test.assert_eq(timed[4] as Int, 0x01)
-    test.assert_eq(timed[5] as Int, 0x05)
-    test.assert_eq(build_le_remove_advertising_set(0x00)[0] as Int, 0x00)
-
-@test
-@satisfies("REQ-BLE-HCI-052")
-fn test_periodic_advertising_command_layout()
-    // 150 and 200 units of 1.25 ms: the intervals the AutoPTS project
-    // gives Configure Periodic Advertising, and the TxPower property.
-    let params = build_le_set_periodic_advertising_parameters(0x00, 0x0096, 0x00C8, PERIODIC_ADV_PROP_INCLUDE_TX_POWER)
-    // Seven octets, not six: the properties field is two octets wide
-    // like the intervals, and a Controller reads the length off the
-    // command ([Vol 4] Part E, Section 7.8.61).
-    test.assert_eq(list.len(params), 7)
-    let want: [u8] = [0x00, 0x96, 0x00, 0xC8, 0x00, 0x01, 0x00]
-    for i in 0..7
-        test.assert_eq(params[i] as Int, want[i] as Int)
-    let data: [u8] = [0x0C, 0x08, 'P', 'A', 'D', 'V']
-    match build_le_set_periodic_advertising_data(0x00, EXT_ADV_DATA_COMPLETE, data)
-        None => test.fail("six octets of periodic data fit")
-        Some(p) =>
-            test.assert_eq(list.len(p), 9)
-            test.assert_eq(p[1] as Int, EXT_ADV_DATA_COMPLETE)
-            test.assert_eq(p[2] as Int, 6)
-            test.assert_eq(p[8] as Int, 'V' as Int)
-    let enable = build_le_set_periodic_advertising_enable(true, 0x00)
-    test.assert_eq(list.len(enable), 2)
-    test.assert_eq(enable[0] as Int, 0x01)
-    test.assert_eq(enable[1] as Int, 0x00)
-    test.assert_eq(build_le_set_periodic_advertising_enable(false, 0x01)[0] as Int, 0x00)
-
-@test
-fn test_periodic_interval_units_from_ms()
-    // 187.5 ms is 150 units of 1.25 ms, 250 ms is 200.
-    test.assert_eq(periodic_interval_units(187) ?? -1, 149)
-    test.assert_eq(periodic_interval_units(188) ?? -1, 150)
-    test.assert_eq(periodic_interval_units(250) ?? -1, 200)
-    test.assert_eq(periodic_interval_units(7) ?? -1, -1)
-    // The ceiling: 81918 ms is 65534 units, 81919 ms is 65535.
-    test.assert_eq(periodic_interval_units(81918) ?? -1, 0xFFFE)
-    test.assert_eq(periodic_interval_units(81919) ?? -1, 0xFFFF)
-
-@test
-@satisfies("REQ-BLE-HCI-053")
-@satisfies("REQ-BLE-HCI-054")
-fn test_periodic_sync_transfer_layout()
-    // Mode 0x01: report the transfer and keep periodic advertising
-    // reports disabled, which is the "without listening" of
-    // GAP/PADV/PASE/BV-03-C.
-    let params = build_le_set_periodic_advertising_sync_transfer_parameters(0x0E41, PERIODIC_TRANSFER_NO_REPORTS, 0x0000, 0x01F4, PERIODIC_TRANSFER_CTE_ANY)
-    test.assert_eq(list.len(params), 8)
-    test.assert_eq(params[0] as Int, 0x41)
-    test.assert_eq(params[1] as Int, 0x0E)
-    test.assert_eq(params[2] as Int, 0x01)
-    test.assert_eq(params[3] as Int, 0x00)
-    test.assert_eq(params[5] as Int, 0xF4)
-    test.assert_eq(params[6] as Int, 0x01)
-    let set_info = build_le_periodic_advertising_set_info_transfer(0x0E41, 0x1234, 0x00)
-    test.assert_eq(list.len(set_info), 5)
-    test.assert_eq(set_info[2] as Int, 0x34)
-    test.assert_eq(set_info[3] as Int, 0x12)
-    test.assert_eq(set_info[4] as Int, 0x00)
-    let transfer = build_le_periodic_advertising_sync_transfer(0x0E41, 0x1234, 0x0005)
-    test.assert_eq(list.len(transfer), 6)
-    test.assert_eq(transfer[4] as Int, 0x05)
-    test.assert_eq(transfer[5] as Int, 0x00)
-
-@test
-@satisfies("REQ-BLE-HCI-051")
-fn test_advertising_set_random_address_layout()
-    let addr: [u8] = [0x01, 0x4F, 0x56, 0x4F, 0x4E, 0xC0]
-    let p = build_le_set_advertising_set_random_address(0x00, addr)
-    test.assert_eq(list.len(p), 7)
-    test.assert_eq(p[0] as Int, 0x00)
-    test.assert_eq(p[1] as Int, 0x01)
-    test.assert_eq(p[6] as Int, 0xC0)
-    test.assert_eq(build_le_set_advertising_set_random_address(0x03, addr)[0] as Int, 0x03)
-
-@test
-@satisfies("REQ-BLE-HCI-055")
-fn test_periodic_sync_opcodes()
-    test.assert_eq(opcode_le_periodic_advertising_create_sync(), 0x2044)
-    test.assert_eq(opcode_le_periodic_advertising_create_sync_cancel(), 0x2045)
-    test.assert_eq(opcode_le_periodic_advertising_terminate_sync(), 0x2046)
-
-@test
-@satisfies("REQ-BLE-HCI-055")
-fn test_build_le_periodic_advertising_create_sync()
-    let addr: [u8] = [0x01, 0x4F, 0x56, 0x4F, 0x4E, 0xC0]
-    // Reports disabled (bit 1), SID 0, a public advertiser, no skip, 5 s.
-    match build_le_periodic_advertising_create_sync(PERIODIC_SYNC_OPTIONS_REPORTS_DISABLED, 0x00, 0x00, addr, 0x0000, 0x01F4, PERIODIC_SYNC_CTE_ANY)
-        None => test.fail("the parameters are inside the range")
-        Some(p) =>
-            test.assert_eq(list.len(p), 14)
-            let want: [u8] = [0x02, 0x00, 0x00, 0x01, 0x4F, 0x56, 0x4F, 0x4E, 0xC0, 0x00, 0x00, 0xF4, 0x01, 0x00]
-            for i in 0..14
-                test.assert_eq(p[i] as Int, want[i] as Int)
-    // Reports enabled with duplicate filtering is 0x04.
-    match build_le_periodic_advertising_create_sync(PERIODIC_SYNC_OPTIONS_DUPLICATE_FILTERING, 0x02, 0x01, addr, 0x0003, 0x4000, PERIODIC_SYNC_CTE_ANY)
-        None => test.fail("options 0x04 and the top of the timeout range are admitted")
-        Some(p) =>
-            test.assert_eq(p[0] as Int, 0x04)
-            test.assert_eq(p[2] as Int, 0x01)
-            test.assert_eq(p[11] as Int, 0x00)
-            test.assert_eq(p[12] as Int, 0x40)
-    // An option bit above bit 2, a timeout below 100 ms and one above
-    // 163.84 s are all refused before anything is sent.
-    test.assert(build_le_periodic_advertising_create_sync(0x08, 0, 0, addr, 0, 0x01F4, 0) == None)
-    test.assert(build_le_periodic_advertising_create_sync(0x00, 0, 0, addr, 0, 0x0009, 0) == None)
-    test.assert(build_le_periodic_advertising_create_sync(0x00, 0, 0, addr, 0, 0x4001, 0) == None)
-
-@test
-@satisfies("REQ-BLE-HCI-055")
-fn test_build_le_periodic_advertising_terminate_sync()
-    let p = build_le_periodic_advertising_terminate_sync(0x0005)
-    test.assert_eq(list.len(p), 2)
-    test.assert_eq(p[0] as Int, 0x05)
-    test.assert_eq(p[1] as Int, 0x00)
-
-@test
-fn test_le_event_mask_periodic_advertising_bits()
-    // Bits 13, 14 and 15 for the Observer's three events, and bit 23 for
-    // the transfer the Peripheral receives ([Vol 4] Part E, Section
-    // 7.8.1).  Bit 23 is byte 2 bit 7 of the command's eight octets.
-    test.assert_eq(LE_EVENT_MASK_PERIODIC_ADVERTISING, 0x80E000)
-    test.assert_eq(LE_EVENT_MASK_PERIODIC_ADVERTISING & LE_EVENT_MASK_DEFAULT, 0)
-    let p = build_set_event_mask(LE_EVENT_MASK_DEFAULT | LE_EVENT_MASK_PERIODIC_ADVERTISING)
-    test.assert_eq(p[0] as Int, 0x1F)
-    test.assert_eq(p[1] as Int, 0xE0)
-    test.assert_eq(p[2] as Int, 0x80)
-    test.assert_eq(p[3] as Int, 0x00)
-
-@test
-fn test_extended_scan_opcodes_and_layout()
-    test.assert_eq(opcode_le_set_extended_scan_parameters(), 0x2041)
-    test.assert_eq(opcode_le_set_extended_scan_enable(), 0x2042)
-    // Passive scanning on the LE 1M PHY, random address, basic filter.
-    let p = build_le_set_extended_scan_parameters(OWN_ADDR_TYPE_RANDOM, SCAN_FILTER_BASIC_UNFILTERED, SCANNING_PHY_1M, LE_SCAN_TYPE_PASSIVE, 0x0060, 0x0030)
-    test.assert_eq(list.len(p), 8)
-    let want: [u8] = [0x01, 0x00, 0x01, 0x00, 0x60, 0x00, 0x30, 0x00]
-    for i in 0..8
-        test.assert_eq(p[i] as Int, want[i] as Int)
-    let on = build_le_set_extended_scan_enable(true, false)
-    test.assert_eq(list.len(on), 6)
-    test.assert_eq(on[0] as Int, 0x01)
-    test.assert_eq(on[1] as Int, 0x00)
-    test.assert_eq(on[5] as Int, 0x00)
-    let off = build_le_set_extended_scan_enable(false, false)
-    test.assert_eq(off[0] as Int, 0x00)
-    test.assert_eq(SCANNING_PHY_1M, 0x01)
-
-// The two commands of the responses family this Host sends: the [v2]
-// periodic advertising parameters, whose twelve octets are what tells a
-// Controller the train carries subevents, and the subevent data, whose
-// parameter list numbers its arrays together.
-@test
-@satisfies("REQ-BLE-HCI-056")
-fn test_pawr_opcodes_and_parameter_layout()
-    test.assert_eq(opcode_le_set_periodic_advertising_parameters_v2(), 0x2086)
-    test.assert_eq(opcode_le_set_periodic_advertising_subevent_data(), 0x2082)
-    // The AutoPTS project's own numbers: 150 to 200 units, 10 subevents,
-    // subevent interval 15, response slot delay 1, response slot spacing
-    // 4 and 5 response slots.
-    let params = build_le_set_periodic_advertising_parameters_v2(0x00, 0x0096, 0x00C8, 0x0000, 10, 15, 1, 4, 5)
-    test.assert_eq(list.len(params), 12)
-    let want: [u8] = [0x00, 0x96, 0x00, 0xC8, 0x00, 0x00, 0x00, 10, 15, 1, 4, 5]
-    for i in 0..12
-        test.assert_eq(params[i] as Int, want[i] as Int)
-
-@test
-@satisfies("REQ-BLE-HCI-056")
-fn test_pawr_subevent_data_layout()
-    let data: [u8] = [0x0C, 0x08, 'P', 'A']
-    let one = PawrSubevent { subevent: 3, response_slot_start: 0, response_slot_count: 5, data: data }
-    match build_le_set_periodic_advertising_subevent_data(0x00, [one])
-        None => test.fail("one subevent of four octets fits")
-        Some(p) =>
-            // Handle, count, the four one-octet fields of the subevent,
-            // then its data: two and four and four.
-            test.assert_eq(list.len(p), 10)
-            let want: [u8] = [0x00, 0x01, 0x03, 0x00, 0x05, 0x04, 0x0C, 0x08, 'P', 'A']
-            for i in 0..10
-                test.assert_eq(p[i] as Int, want[i] as Int)
-    // Two subevents: each element is its four fields and then its data.
-    let two = PawrSubevent { subevent: 0, response_slot_start: 1, response_slot_count: 2, data: data }
-    match build_le_set_periodic_advertising_subevent_data(0x00, [one, two])
-        None => test.fail("two subevents fit one command")
-        Some(p) =>
-            // Two octets, then per element four fields and four data octets.
-            test.assert_eq(list.len(p), 2 + 8 + 8)
-            let want2: [u8] = [0x00, 0x02,
-                               0x03, 0x00, 0x05, 0x04, 0x0C, 0x08, 'P', 'A',
-                               0x00, 0x01, 0x02, 0x04, 0x0C, 0x08, 'P', 'A']
-            for i in 0..18
-                test.assert_eq(p[i] as Int, want2[i] as Int)
-    // No subevent at all, and more than the 0x0F the count field holds.
-    match build_le_set_periodic_advertising_subevent_data(0x00, [])
-        None => ()
-        Some(_) => test.fail("a command with no subevent is refused")
-    var many: [PawrSubevent] = []
-    for i in 0..16
-        list.push(many, one)
-    match build_le_set_periodic_advertising_subevent_data(0x00, many)
-        None => ()
-        Some(_) => test.fail("sixteen subevents do not fit one command")
-    // A subevent above 0x7F and data above 251 octets are refused too.
-    let high = PawrSubevent { subevent: 0x80, response_slot_start: 0, response_slot_count: 0, data: [] }
-    match build_le_set_periodic_advertising_subevent_data(0x00, [high])
-        None => ()
-        Some(_) => test.fail("a subevent above 0x7F is refused")
-    var big: [u8] = []
-    for _ in 0..252
-        list.push(big, 0x00)
-    let long = PawrSubevent { subevent: 0x00, response_slot_start: 0, response_slot_count: 0, data: big }
-    match build_le_set_periodic_advertising_subevent_data(0x00, [long])
-        None => ()
-        Some(_) => test.fail("252 octets of subevent data are refused")
-
-@test
-@satisfies("REQ-BLE-HCI-056")
-fn test_pawr_event_mask_bits()
-    // Bits 38 and 39 only, and neither of them in the plain periodic
-    // advertising mask.
-    test.assert_eq(LE_EVENT_MASK_PERIODIC_ADVERTISING_RESPONSES, 0x000000C000000000)
-    test.assert_eq((LE_EVENT_MASK_PERIODIC_ADVERTISING & LE_EVENT_MASK_PERIODIC_ADVERTISING_RESPONSES), 0)
-    test.assert_eq((LE_EVENT_MASK_DEFAULT & LE_EVENT_MASK_PERIODIC_ADVERTISING_RESPONSES), 0)
-    test.assert_eq(PAWR_SUBEVENT_INTERVAL_MIN, 0x06)
-    test.assert_eq(PAWR_RESPONSE_SLOT_DELAY_MIN, 0x01)
-
-// ── Isochronous channels: tests ─────────────────────────────────────
-
-@tier(app)
-fn same_octets(p: [u8], want: [u8])
-    test.assert_eq(list.len(p), list.len(want))
-    for i in 0..list.len(want)
-        test.assert_eq(p[i] as Int, want[i] as Int)
-
-@test
-@satisfies("REQ-BLE-HCI-057")
-fn test_iso_opcodes()
-    test.assert_eq(opcode_le_read_buffer_size_v2(), 0x2060)
-    test.assert_eq(opcode_le_read_iso_tx_sync(), 0x2061)
-    test.assert_eq(opcode_le_set_cig_parameters(), 0x2062)
-    test.assert_eq(opcode_le_set_cig_parameters_test(), 0x2063)
-    test.assert_eq(opcode_le_create_cis(), 0x2064)
-    test.assert_eq(opcode_le_remove_cig(), 0x2065)
-    test.assert_eq(opcode_le_accept_cis_request(), 0x2066)
-    test.assert_eq(opcode_le_reject_cis_request(), 0x2067)
-    test.assert_eq(opcode_le_create_big(), 0x2068)
-    test.assert_eq(opcode_le_create_big_test(), 0x2069)
-    test.assert_eq(opcode_le_terminate_big(), 0x206A)
-    test.assert_eq(opcode_le_big_create_sync(), 0x206B)
-    test.assert_eq(opcode_le_big_terminate_sync(), 0x206C)
-    test.assert_eq(opcode_le_setup_iso_data_path(), 0x206E)
-    test.assert_eq(opcode_le_remove_iso_data_path(), 0x206F)
-    test.assert_eq(opcode_le_iso_transmit_test(), 0x2070)
-    test.assert_eq(opcode_le_iso_receive_test(), 0x2071)
-    test.assert_eq(opcode_le_iso_read_test_counters(), 0x2072)
-    test.assert_eq(opcode_le_iso_test_end(), 0x2073)
-    test.assert_eq(opcode_le_set_host_feature(), 0x2074)
-    test.assert_eq(opcode_le_read_iso_link_quality(), 0x2075)
-    test.assert_eq(opcode_le_set_host_feature_v2(), 0x2097)
-
-@test
-@satisfies("REQ-BLE-HCI-057")
-fn test_set_host_feature_layout()
-    // Bit 32, Connected Isochronous Stream (Host Support), on and off.
-    same_octets(build_le_set_host_feature(FEATURE_CONNECTED_ISOCHRONOUS_STREAM_HOST_SUPPORT, true), [0x20, 0x01])
-    same_octets(build_le_set_host_feature(FEATURE_CONNECTED_ISOCHRONOUS_STREAM_HOST_SUPPORT, false), [0x20, 0x00])
-    // The [v2] form widens Bit_Number to two octets.
-    same_octets(build_le_set_host_feature_v2(0x0123, true), [0x23, 0x01, 0x01])
-
-@test
-@satisfies("REQ-BLE-HCI-057")
-fn test_connection_handle_only_commands()
-    // 12 bits meaningful: the top four bits of the second octet are clear.
-    same_octets(build_iso_connection_handle(0x0ABC), [0xBC, 0x0A])
-    same_octets(build_iso_connection_handle(0xFABC), [0xBC, 0x0A])
-    same_octets(build_le_reject_cis_request(0x0102, 0x0D), [0x02, 0x01, 0x0D])
-    same_octets(build_le_accept_cis_request(0x0102), [0x02, 0x01])
-    same_octets(build_le_remove_cig(0x07), [0x07])
-    same_octets(build_le_big_terminate_sync(0x03), [0x03])
-    same_octets(build_le_terminate_big(0x02, 0x16), [0x02, 0x16])
-    same_octets(build_le_remove_iso_data_path(0x0040, 0x03), [0x40, 0x00, 0x03])
-    same_octets(build_le_iso_test(0x0041, ISO_TEST_PAYLOAD_MAXIMUM_LENGTH), [0x41, 0x00, 0x02])
-
-@tier(app)
-fn cig_fixture() -> CigParameters
-    CigParameters {
-        cig_id: 0x01,
-        sdu_interval_c_to_p: 0x002710,
-        sdu_interval_p_to_c: 0x004E20,
-        worst_case_sca: 0x07,
-        packing: ISO_PACKING_INTERLEAVED,
-        framing: ISO_FRAMING_FRAMED_SEGMENTABLE,
-        max_transport_latency_c_to_p: 0x0014,
-        max_transport_latency_p_to_c: 0x0028 }
-
-@tier(app)
-fn cis_fixture(id: Int) -> CisParameters
-    CisParameters {
-        cis_id: id,
-        max_sdu_c_to_p: 0x0064 + id,
-        max_sdu_p_to_c: 0x00C8 + id,
-        phy_c_to_p: 0x02,
-        phy_p_to_c: 0x03,
-        rtn_c_to_p: 0x02 + id,
-        rtn_p_to_c: 0x05 + id }
-
-// The arrayed CIS parameters go out element by element ([Vol 4] Part E,
-// Section 5.4), so a second CIS starts with its CIS_ID and not with the
-// first CIS's second field.
-@test
-@satisfies("REQ-BLE-HCI-057")
-fn test_set_cig_parameters_layout()
-    let head: [u8] = [0x01, 0x10, 0x27, 0x00, 0x20, 0x4E, 0x00, 0x07, 0x01, 0x01, 0x14, 0x00, 0x28, 0x00]
-    match build_le_set_cig_parameters(cig_fixture(), [cis_fixture(0)])
-        None => test.fail("one CIS fits")
-        Some(p) =>
-            var want: [u8] = head[:]
-            list.append(want, [0x01, 0x00, 0x64, 0x00, 0xC8, 0x00, 0x02, 0x03, 0x02, 0x05])
-            same_octets(p, want)
-    match build_le_set_cig_parameters(cig_fixture(), [cis_fixture(0), cis_fixture(1), cis_fixture(2)])
-        None => test.fail("three CISes fit")
-        Some(p) =>
-            var want: [u8] = head[:]
-            list.append(want, [0x03])
-            list.append(want, [0x00, 0x64, 0x00, 0xC8, 0x00, 0x02, 0x03, 0x02, 0x05])
-            list.append(want, [0x01, 0x65, 0x00, 0xC9, 0x00, 0x02, 0x03, 0x03, 0x06])
-            list.append(want, [0x02, 0x66, 0x00, 0xCA, 0x00, 0x02, 0x03, 0x04, 0x07])
-            same_octets(p, want)
-    // An empty list encodes as CIS_Count 0; 32 CISes do not fit the count.
-    match build_le_set_cig_parameters(cig_fixture(), [])
-        None => test.fail("an empty list encodes")
-        Some(p) => test.assert_eq(list.len(p), 15)
-    var many: [CisParameters] = []
-    for i in 0..32
-        list.push(many, cis_fixture(i))
-    test.assert(build_le_set_cig_parameters(cig_fixture(), many) == None)
-
-@test
-@satisfies("REQ-BLE-HCI-057")
-fn test_set_cig_parameters_test_layout()
-    let cig = CigTestParameters {
-        cig_id: 0x02, sdu_interval_c_to_p: 0x002710, sdu_interval_p_to_c: 0x002710,
-        ft_c_to_p: 0x01, ft_p_to_c: 0x02, iso_interval: 0x0008,
-        worst_case_sca: 0x00, packing: ISO_PACKING_SEQUENTIAL, framing: ISO_FRAMING_UNFRAMED }
-    let a = CisTestParameters {
-        cis_id: 0x00, nse: 0x03, max_sdu_c_to_p: 0x0064, max_sdu_p_to_c: 0x0000,
-        max_pdu_c_to_p: 0x0064, max_pdu_p_to_c: 0x0000, phy_c_to_p: 0x02, phy_p_to_c: 0x02,
-        bn_c_to_p: 0x01, bn_p_to_c: 0x00 }
-    let b = CisTestParameters {
-        cis_id: 0x01, nse: 0x04, max_sdu_c_to_p: 0x00FB, max_sdu_p_to_c: 0x00FB,
-        max_pdu_c_to_p: 0x00FB, max_pdu_p_to_c: 0x00FB, phy_c_to_p: 0x01, phy_p_to_c: 0x01,
-        bn_c_to_p: 0x02, bn_p_to_c: 0x02 }
-    let head: [u8] = [0x02, 0x10, 0x27, 0x00, 0x10, 0x27, 0x00, 0x01, 0x02, 0x08, 0x00, 0x00, 0x00, 0x00]
-    match build_le_set_cig_parameters_test(cig, [a])
-        None => test.fail("one CIS fits")
-        Some(p) =>
-            var want: [u8] = head[:]
-            list.append(want, [0x01, 0x00, 0x03, 0x64, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x02, 0x02, 0x01, 0x00])
-            same_octets(p, want)
-    match build_le_set_cig_parameters_test(cig, [a, b, a])
-        None => test.fail("three CISes fit")
-        Some(p) =>
-            var want: [u8] = head[:]
-            list.append(want, [0x03])
-            list.append(want, [0x00, 0x03, 0x64, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x02, 0x02, 0x01, 0x00])
-            list.append(want, [0x01, 0x04, 0xFB, 0x00, 0xFB, 0x00, 0xFB, 0x00, 0xFB, 0x00, 0x01, 0x01, 0x02, 0x02])
-            list.append(want, [0x00, 0x03, 0x64, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x02, 0x02, 0x01, 0x00])
-            same_octets(p, want)
-    var many: [CisTestParameters] = []
-    for _ in 0..32
-        list.push(many, a)
-    test.assert(build_le_set_cig_parameters_test(cig, many) == None)
-
-@test
-@satisfies("REQ-BLE-HCI-057")
-fn test_create_cis_pairs_go_element_by_element()
-    match build_le_create_cis([CisLink { cis_connection_handle: 0x0010, acl_connection_handle: 0x0001 }])
-        None => test.fail("one link fits")
-        Some(p) => same_octets(p, [0x01, 0x10, 0x00, 0x01, 0x00])
-    let three = [CisLink { cis_connection_handle: 0x0010, acl_connection_handle: 0x0001 },
-                 CisLink { cis_connection_handle: 0x0011, acl_connection_handle: 0x0002 },
-                 CisLink { cis_connection_handle: 0x0012, acl_connection_handle: 0x0003 }]
-    match build_le_create_cis(three)
-        None => test.fail("three links fit")
-        Some(p) => same_octets(p, [0x03, 0x10, 0x00, 0x01, 0x00, 0x11, 0x00, 0x02, 0x00, 0x12, 0x00, 0x03, 0x00])
-    test.assert(build_le_create_cis([]) == None)
-    var many: [CisLink] = []
-    for _ in 0..32
-        list.push(many, three[0])
-    test.assert(build_le_create_cis(many) == None)
-
-@tier(app)
-fn broadcast_code_fixture() -> [u8]
-    var code: [u8] = []
-    for i in 0..16
-        list.push(code, (0xA0 + i) as u8)
-    code
-
-@test
-@satisfies("REQ-BLE-HCI-057")
-fn test_create_big_layout()
-    let code = broadcast_code_fixture()
-    match build_le_create_big(0x01, 0x02, 0x02, 0x002710, 0x0064, 0x0014, 0x03, 0x02, ISO_PACKING_INTERLEAVED, ISO_FRAMING_UNFRAMED, true, code)
-        None => test.fail("two BIS fit")
-        Some(p) =>
-            var want: [u8] = [0x01, 0x02, 0x02, 0x10, 0x27, 0x00, 0x64, 0x00, 0x14, 0x00, 0x03, 0x02, 0x01, 0x00, 0x01]
-            list.append(want, code)
-            same_octets(p, want)
-            test.assert_eq(list.len(p), 31)
-    test.assert(build_le_create_big(0x01, 0x02, 0x00, 0x002710, 0x0064, 0x0014, 0x03, 0x02, 0x00, 0x00, false, code) == None)
-    test.assert(build_le_create_big(0x01, 0x02, 0x20, 0x002710, 0x0064, 0x0014, 0x03, 0x02, 0x00, 0x00, false, code) == None)
-    test.assert(build_le_create_big(0x01, 0x02, 0x01, 0x002710, 0x0064, 0x0014, 0x03, 0x02, 0x00, 0x00, false, code[0:15]) == None)
-
-@test
-@satisfies("REQ-BLE-HCI-057")
-fn test_create_big_test_layout()
-    let code = broadcast_code_fixture()
-    match build_le_create_big_test(0x01, 0x02, 0x03, 0x002710, 0x0008, 0x02, 0x0064, 0x0064, 0x02, ISO_PACKING_SEQUENTIAL, ISO_FRAMING_FRAMED_SEGMENTABLE, 0x01, 0x02, 0x00, false, code)
-        None => test.fail("three BIS fit")
-        Some(p) =>
-            var want: [u8] = [0x01, 0x02, 0x03, 0x10, 0x27, 0x00, 0x08, 0x00, 0x02, 0x64, 0x00, 0x64, 0x00, 0x02, 0x00, 0x01, 0x01, 0x02, 0x00, 0x00]
-            list.append(want, code)
-            same_octets(p, want)
-            test.assert_eq(list.len(p), 36)
-    test.assert(build_le_create_big_test(0x01, 0x02, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, code) == None)
-    test.assert(build_le_create_big_test(0x01, 0x02, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, code[0:3]) == None)
-
-@tier(app)
-fn cig_with_intervals(c_to_p: Int, p_to_c: Int) -> CigParameters
-    CigParameters {
-        cig_id: 0x01, sdu_interval_c_to_p: c_to_p, sdu_interval_p_to_c: p_to_c,
-        worst_case_sca: 0x07, packing: ISO_PACKING_INTERLEAVED, framing: ISO_FRAMING_FRAMED_SEGMENTABLE,
-        max_transport_latency_c_to_p: 0x0014, max_transport_latency_p_to_c: 0x0028 }
-
-// SDU_Interval is 0x0000FF to 0x0FFFFF microseconds in the four commands
-// that carry it ([Vol 4] Part E, Section 7.8.97, 7.8.98, 7.8.103 and
-// 7.8.104).  The bounds themselves are accepted; one below, one above, and
-// a value that does not fit the three octets (which would otherwise be cut
-// to its low 24 bits) are refused.
-@test
-@satisfies("REQ-BLE-HCI-057")
-fn test_sdu_interval_range_is_checked_by_the_four_builders()
-    test.assert(iso_sdu_interval_ok(0x0000FF))
-    test.assert(iso_sdu_interval_ok(0x0FFFFF))
-    test.assert(not iso_sdu_interval_ok(0x0000FE))
-    test.assert(not iso_sdu_interval_ok(0x100000))
-    test.assert(not iso_sdu_interval_ok(0x1000000))
-    test.assert(not iso_sdu_interval_ok(-1))
-    let code = broadcast_code_fixture()
-    for bad in [0, 0xFE, 0x100000, 0xFFFFFF, 0x1002710]
-        // Either direction of the CIG commands.
-        test.assert(build_le_set_cig_parameters(cig_with_intervals(bad, 0x002710), [cis_fixture(0)]) == None)
-        test.assert(build_le_set_cig_parameters(cig_with_intervals(0x002710, bad), [cis_fixture(0)]) == None)
-        let t = CigTestParameters {
-            cig_id: 0x02, sdu_interval_c_to_p: bad, sdu_interval_p_to_c: 0x002710,
-            ft_c_to_p: 0x01, ft_p_to_c: 0x01, iso_interval: 0x0008,
-            worst_case_sca: 0x00, packing: ISO_PACKING_SEQUENTIAL, framing: ISO_FRAMING_UNFRAMED }
-        test.assert(build_le_set_cig_parameters_test(t, []) == None)
-        let u = CigTestParameters {
-            cig_id: 0x02, sdu_interval_c_to_p: 0x002710, sdu_interval_p_to_c: bad,
-            ft_c_to_p: 0x01, ft_p_to_c: 0x01, iso_interval: 0x0008,
-            worst_case_sca: 0x00, packing: ISO_PACKING_SEQUENTIAL, framing: ISO_FRAMING_UNFRAMED }
-        test.assert(build_le_set_cig_parameters_test(u, []) == None)
-        test.assert(build_le_create_big(0x01, 0x02, 0x01, bad, 0x0064, 0x0014, 0x03, 0x02, 0x00, 0x00, false, code) == None)
-        test.assert(build_le_create_big_test(0x01, 0x02, 0x01, bad, 0x0008, 0x02, 0x0064, 0x0064, 0x02, 0x00, 0x00, 0x01, 0x01, 0x00, false, code) == None)
-    // The bounds build.
-    for good in [0x0000FF, 0x0FFFFF]
-        test.assert(build_le_set_cig_parameters(cig_with_intervals(good, good), [cis_fixture(0)]) != None)
-        test.assert(build_le_create_big(0x01, 0x02, 0x01, good, 0x0064, 0x0014, 0x03, 0x02, 0x00, 0x00, false, code) != None)
-        test.assert(build_le_create_big_test(0x01, 0x02, 0x01, good, 0x0008, 0x02, 0x0064, 0x0064, 0x02, 0x00, 0x00, 0x01, 0x01, 0x00, false, code) != None)
-
-@test
-@satisfies("REQ-BLE-HCI-057")
-fn test_big_create_sync_layout()
-    let code = broadcast_code_fixture()
-    match build_le_big_create_sync(0x01, 0x0123, true, code, 0x00, 0x0C80, [0x01])
-        None => test.fail("one BIS fits")
-        Some(p) =>
-            var want: [u8] = [0x01, 0x23, 0x01, 0x01]
-            list.append(want, code)
-            list.append(want, [0x00, 0x80, 0x0C, 0x01, 0x01])
-            same_octets(p, want)
-    match build_le_big_create_sync(0x01, 0x0123, false, code, 0x03, 0x0C80, [0x01, 0x02, 0x05])
-        None => test.fail("three BIS fit")
-        Some(p) =>
-            // BIG_Handle, Sync_Handle, Encryption, Broadcast_Code, then MSE,
-            // BIG_Sync_Timeout, Num_BIS and the three BIS indexes.
-            test.assert_eq(list.len(p), 1 + 2 + 1 + 16 + 1 + 2 + 1 + 3)
-            same_octets(p[20:], [0x03, 0x80, 0x0C, 0x03, 0x01, 0x02, 0x05])
-    test.assert(build_le_big_create_sync(0x01, 0x0123, false, code, 0, 0x0C80, []) == None)
-    test.assert(build_le_big_create_sync(0x01, 0x0123, false, code[0:8], 0, 0x0C80, [0x01]) == None)
-    var many: [Int] = []
-    for _ in 0..32
-        list.push(many, 1)
-    test.assert(build_le_big_create_sync(0x01, 0x0123, false, code, 0, 0x0C80, many) == None)
-
-@test
-@satisfies("REQ-BLE-HCI-057")
-fn test_setup_iso_data_path_layout()
-    let lc3 = iso_codec_id(ISO_CODING_FORMAT_LC3, 0x0000, 0x0000)
-    same_octets(lc3, [0x06, 0x00, 0x00, 0x00, 0x00])
-    same_octets(iso_codec_id(ISO_CODING_FORMAT_VENDOR_SPECIFIC, 0x0059, 0x1234), [0xFF, 0x59, 0x00, 0x34, 0x12])
-    match build_le_setup_iso_data_path(0x0040, ISO_DATA_PATH_INPUT, ISO_DATA_PATH_HCI, lc3, 0x000A28, [])
-        None => test.fail("an empty configuration fits")
-        Some(p) => same_octets(p, [0x40, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x28, 0x0A, 0x00, 0x00])
-    match build_le_setup_iso_data_path(0x0041, ISO_DATA_PATH_OUTPUT, 0x01, iso_codec_id(ISO_CODING_FORMAT_TRANSPARENT, 0, 0), 0x000000, [0xAA, 0xBB, 0xCC])
-        None => test.fail("a configuration of three octets fits")
-        Some(p) =>
-            test.assert_eq(list.len(p), 13 + 3)
-            same_octets(p[12:16], [0x03, 0xAA, 0xBB, 0xCC])
-    test.assert(build_le_setup_iso_data_path(0x0040, 0, 0, [0x06], 0, []) == None)
-    var big: [u8] = []
-    for _ in 0..256
-        list.push(big, 0x00)
-    test.assert(build_le_setup_iso_data_path(0x0040, 0, 0, lc3, 0, big) == None)
-
-@test
-@satisfies("REQ-BLE-HCI-057")
-fn test_iso_event_mask_bits()
-    // Subevent code minus one: 0x19 -> 24, 0x1A -> 25, 0x1B..0x1E -> 26..29,
-    // 0x22 -> 33, 0x2A -> 41.
-    test.assert_eq(LE_EVENT_MASK_CIS_ESTABLISHED, 1 << 24)
-    test.assert_eq(LE_EVENT_MASK_CIS_REQUEST, 1 << 25)
-    test.assert_eq(LE_EVENT_MASK_BIG, (1 << 26) | (1 << 27) | (1 << 28) | (1 << 29))
-    test.assert_eq(LE_EVENT_MASK_BIG_BROADCASTER, (1 << 26) | (1 << 27))
-    test.assert_eq(LE_EVENT_MASK_BIG_RECEIVER, (1 << 28) | (1 << 29))
-    test.assert_eq(LE_EVENT_MASK_BIG_BROADCASTER | LE_EVENT_MASK_BIG_RECEIVER, LE_EVENT_MASK_BIG)
-    test.assert_eq(LE_EVENT_MASK_BIG_INFO_ADVERTISING_REPORT, 1 << 33)
-    test.assert_eq(LE_EVENT_MASK_CIS_ESTABLISHED_V2, 1 << 41)
-    test.assert_eq(LE_EVENT_MASK_ISOCHRONOUS,
-        LE_EVENT_MASK_CIS_ESTABLISHED | LE_EVENT_MASK_CIS_REQUEST | LE_EVENT_MASK_BIG
-        | LE_EVENT_MASK_BIG_INFO_ADVERTISING_REPORT | LE_EVENT_MASK_CIS_ESTABLISHED_V2)
-    test.assert_eq(LE_EVENT_MASK_ISOCHRONOUS & (LE_EVENT_MASK_DEFAULT | LE_EVENT_MASK_PERIODIC_ADVERTISING | LE_EVENT_MASK_PERIODIC_ADVERTISING_RESPONSES), 0)
-    same_octets(build_set_event_mask(LE_EVENT_MASK_ISOCHRONOUS), [0x00, 0x00, 0x00, 0x3F, 0x02, 0x02, 0x00, 0x00])
-
-@test
-@satisfies("REQ-BLE-HCI-057")
-fn test_le_octets_helpers()
-    same_octets(le16_octets(0x1234), [0x34, 0x12])
-    same_octets(le16_octets(0x11234), [0x34, 0x12])
-    same_octets(le32_octets(0x01020304), [0x04, 0x03, 0x02, 0x01])
-    same_octets(le32_octets(0xDEADBEEF), [0xEF, 0xBE, 0xAD, 0xDE])

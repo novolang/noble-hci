@@ -1,0 +1,93 @@
+// tests/uuid_tests.nv — the unit tests of src/uuid.nv.
+//
+//   novo test tests/uuid_tests.nv
+
+use std.test
+use uuid.{ base_uuid_bytes, uuid128_eq, uuid16_from_le_bytes, uuid16_to_128, uuid16_to_le_bytes, uuid32_to_128, uuid_eq_short_full }
+
+@test
+fn test_base_uuid_shape()
+    let b = base_uuid_bytes()
+    test.assert_eq(list.len(b), 16)
+    // Sentinel bytes at fixed offsets in LE base UUID.
+    test.assert_eq(b[0] as Int, 0xFB)
+    // 0000180A-0000-1000-8000-00805F9B34FB, least significant octet
+    // first: ... 80 00 00 80 00 10 00 00 0A 18 00 00.
+    test.assert_eq(b[7] as Int, 0x80)
+    test.assert_eq(b[9] as Int, 0x10)
+
+@test
+@satisfies("REQ-BLE-ATT-UUID-002")
+fn test_uuid16_to_128_overlays_at_offset_12()
+    // Device Information service is 0x180A.  Expanded LE form
+    // should have base bytes 0..11, then 0A 18, then 00 00.
+    let full = uuid16_to_128(0x180A)
+    test.assert_eq(list.len(full), 16)
+    test.assert_eq(full[0] as Int, 0xFB)   // base
+    test.assert_eq(full[11] as Int, 0x00)   // base
+    test.assert_eq(full[12] as Int, 0x0A)   // short LSB
+    test.assert_eq(full[13] as Int, 0x18)   // short MSB
+    test.assert_eq(full[14] as Int, 0x00)
+    test.assert_eq(full[15] as Int, 0x00)
+
+@test
+@satisfies("REQ-BLE-ATT-UUID-002")
+fn test_uuid32_to_128_uses_all_four_bytes()
+    let full = uuid32_to_128(0xDEADBEEF)
+    test.assert_eq(full[12] as Int, 0xEF)
+    test.assert_eq(full[13] as Int, 0xBE)
+    test.assert_eq(full[14] as Int, 0xAD)
+    test.assert_eq(full[15] as Int, 0xDE)
+
+@test
+fn test_uuid128_eq_self()
+    let a = uuid16_to_128(0x2A29)
+    let b = uuid16_to_128(0x2A29)
+    test.assert_eq(uuid128_eq(a, b), true)
+
+@test
+fn test_uuid128_eq_differs_in_one_byte()
+    let a = uuid16_to_128(0x2A29)
+    let b = uuid16_to_128(0x2A24)
+    test.assert_eq(uuid128_eq(a, b), false)
+
+@test
+fn test_uuid128_eq_short_buffer_returns_false()
+    let a: [u8] = [0xFB, 0x34]
+    let b = uuid16_to_128(0x180A)
+    test.assert_eq(uuid128_eq(a, b), false)
+
+@test
+fn test_uuid_eq_short_full_match()
+    let full = uuid16_to_128(0x2A29)
+    test.assert_eq(uuid_eq_short_full(0x2A29, full), true)
+
+@test
+fn test_uuid_eq_short_full_short_mismatch()
+    let full = uuid16_to_128(0x2A29)
+    test.assert_eq(uuid_eq_short_full(0x2A24, full), false)
+
+@test
+fn test_uuid_eq_short_full_non_base_rejected()
+    // A vendor 128-bit UUID isn't a short alias — bytes 0..11
+    // diverge from the base.
+    let vendor: [u8] = [
+        0x11, 0x22, 0x33, 0x44,
+        0x55, 0x66, 0x77, 0x88,
+        0x99, 0xAA, 0xBB, 0xCC,
+        0x0A, 0x18, 0x00, 0x00]
+    test.assert_eq(uuid_eq_short_full(0x180A, vendor), false)
+
+@test
+@satisfies("REQ-BLE-ATT-UUID-003")
+fn test_uuid16_le_round_trip()
+    let b = uuid16_to_le_bytes(0x180A)
+    test.assert_eq(list.len(b), 2)
+    test.assert_eq(b[0] as Int, 0x0A)
+    test.assert_eq(b[1] as Int, 0x18)
+    test.assert_eq(uuid16_from_le_bytes(b), 0x180A)
+
+@test
+fn test_uuid16_from_le_short_buffer()
+    let b: [u8] = [0x0A]
+    test.assert_eq(uuid16_from_le_bytes(b), -1)

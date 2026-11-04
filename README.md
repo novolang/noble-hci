@@ -39,5 +39,20 @@ the two sides share one definition of the wire.  The commands and events
 are the subset the stack uses; a command with no entry is not built here.
 `docs/hci.md` describes the byte layouts.
 
-`novo test` in this directory runs the unit tests beside each module and
-the edge tests in `tests/edge_tests.nv`.
+## Install, build and test
+
+```sh
+novo pkg add noble-hci
+```
+
+adds the package to the `[dependencies]` table of the consumer's `novo.toml`.  In a checkout of the package:
+
+```sh
+novo build
+novo test
+```
+
+`novo build` type-checks and effect-checks every module under `src/`; the package is a library and writes no binary.
+`novo test` runs the suites under `tests/`: one per module (`tests/<module>_tests.nv`), the boundary cases in
+`tests/edge_tests.nv`, the refusals in `tests/reject_tests.nv` and the pinned wire values in `tests/wire_tests.nv`.
+The tests are not part of the published package.
