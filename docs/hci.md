@@ -64,3 +64,37 @@ UUID `00000000-0000-1000-8000-00805F9B34FB` with the short value in octets
 12 to 15.  `uuid16_to_128` and `uuid32_to_128` expand one, and
 `uuid_eq_short_full` compares a short UUID with a 128-bit one without
 building the expansion.
+
+## Channel Sounding
+
+`hci_cs` is the Host's side of the HCI of Channel Sounding (Core Vol 4 Part E,
+sections 7.7.65.39 to 7.7.65.46, 7.8.130 to 7.8.143, 7.8.157 and 7.8.158).
+The layouts agree octet for octet with the Controller that answers them
+(`orbit/noble-controller/src/ll_cs_hci.nv` and `ll_cs_res.nv`).
+
+A command builder returns an `HciCsCmd`: the opcode and the parameter octets in
+a buffer of 256 that is part of the record, so a builder does not allocate.
+`cs_cmd_msg` turns it into the `HciCmdMsg` a transport takes (this one
+allocates the list).  The opcode of command `x` is `opcode_le_cs_x()`.
+
+An event reader takes the LE Meta event packet (code 0x3E, length, subevent
+code, parameters) and fills a record, answering false for another event, a
+length that is not the event's or a value Core does not allow.  The Subevent
+Result and the Subevent Result Continue event fill an `HciCsResultEvent` of at
+most 80 steps; `cs_proc_add` joins the events of a procedure into an
+`HciCsProcResult`.
+
+A step is read from the length it carries:
+
+| Mode | Data octets | Fields |
+|---|---|---|
+| 0, reflector | 3 | quality, RSSI, antenna |
+| 0, initiator | 5 | the same and the measured frequency offset |
+| 1 | 6 | quality, NADM, RSSI, time difference `ToA_ToD` or `ToD_ToA`, antenna |
+| 1 with a sounding sequence | 14 | and the two phase correction terms |
+| 2 | 1 + 4 (paths + 1) | the permutation index and, for each path and the tone extension slot, a 24-bit term and a quality indicator |
+| 3 | 7 + 4 (paths + 1), 8 more with the terms | the fields of mode 1 and of mode 2 |
+
+A step with no data octets is a step the Controller aborted.  Mode 3 with and
+without the sounding terms have lengths that differ by 8; the number of antenna
+paths of the event tells which.

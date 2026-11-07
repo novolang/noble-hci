@@ -12,6 +12,7 @@ depends on the standard library only.
 | `hci_commands` | one `opcode_<name>()` per command and one `build_<name>(...)` for every command that takes parameters (Core Vol 4 Part E, section 7) |
 | `hci_frame` | OGF and event-code constants, `pack_opcode`, the ACL handle and flag fields, the `HciCmd`, `HciEvt` and `HciAcl` frames, `HciCmdMsg` and `HciEvtMsg` with their encoders and decoders |
 | `hci_codec` | the H4-framed command builders (`cmd_hci_reset`, `cmd_le_set_advertising_data`, ...), the readers of events and ISO and ACL data packets, and `build_iso_data_packet` |
+| `hci_cs` | the eighteen commands of Channel Sounding as builders over a fixed buffer (`HciCsCmd`), the nine events as readers into records, the capability record, the data of a step of each mode and role (`HciCsStep`), and the result of one procedure joined from its events (`HciCsProcResult`); Core Vol 4 Part E, sections 7.7.65.39 to 7.7.65.46, 7.8.130 to 7.8.143, 7.8.157 and 7.8.158 |
 | `hci_h4` | the H4 packet-type byte, `frame_h4`, and `h4_packet_length`, which tells a deframer how many bytes the next packet occupies |
 | `bd_addr` | `BdAddr`, `BdAddrKind`, `classify_random` and `format_bd_addr` |
 | `uuid` | the Bluetooth Base UUID, 16-bit and 32-bit expansion to 128 bits, comparison without allocating, and the little-endian wire form |

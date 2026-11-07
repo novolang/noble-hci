@@ -1,0 +1,734 @@
+// tests/hci_cs_tests.nv — the Channel Sounding commands and events of `hci_cs`, held to the octet layouts of Core 6.3 [Vol 4] Part E, Sections
+// 7.7.65.39 to 7.7.65.46 and 7.8.130 to 7.8.143, 7.8.157 and 7.8.158.
+//
+//   novo test tests/hci_cs_tests.nv
+
+use std.test
+use hci_cs
+use hci_frame
+
+// The LE Meta event packet of subevent `sub` and the parameter octets `p` that follow the subevent code.
+fn meta(sub: Int, p: [Int]) -> [u8]
+    var e: [u8] = [0x3E, (list.len(p) + 1) as u8, sub as u8]
+    for v in p
+        list.push(e, v as u8)
+    e
+
+fn octets(c: hci_cs.HciCsCmd) -> [u8]
+    hci_cs.cs_cmd_params(c)
+
+// `n` copies of `v`.
+fn rep(v: Int, n: Int) -> [Int]
+    var out: [Int] = []
+    for _ in 0..n
+        list.push(out, v)
+    out
+
+fn cat(a: [Int], b: [Int]) -> [Int]
+    var out: [Int] = []
+    for v in a
+        list.push(out, v)
+    for v in b
+        list.push(out, v)
+    out
+
+// The 28 octets of a [v1] record of a made-up Controller.
+fn caps_bytes_v1() -> [Int]
+    [1, 0x05, 0x00, 2, 3, 0x03, 0x01, 0x40, 30, 20, 10, 0x01, 0x00, 0x03, 0x00, 0x06, 0x12, 0x00, 0x7C, 0x00, 0x7E, 0x00, 0xE0, 0x01, 0x03, 0x00, 4, 0x1F]
+
+fn caps_bytes_v2() -> [Int]
+    cat(caps_bytes_v1(), [0x30, 0x00, 2, 31, 21, 11])
+
+fn u8s(l: [Int]) -> [u8]
+    var out: [u8] = []
+    for v in l
+        list.push(out, v as u8)
+    out
+
+// ── The opcodes ─────────────────────────────────────────────────────
+
+@test
+fn test_the_eighteen_opcodes_are_0x2000_plus_the_ocf()
+    test.assert_eq(hci_cs.opcode_le_cs_read_local_supported_capabilities(), 0x2089)
+    test.assert_eq(hci_cs.opcode_le_cs_read_remote_supported_capabilities(), 0x208A)
+    test.assert_eq(hci_cs.opcode_le_cs_write_cached_remote_supported_capabilities(), 0x208B)
+    test.assert_eq(hci_cs.opcode_le_cs_security_enable(), 0x208C)
+    test.assert_eq(hci_cs.opcode_le_cs_set_default_settings(), 0x208D)
+    test.assert_eq(hci_cs.opcode_le_cs_read_remote_fae_table(), 0x208E)
+    test.assert_eq(hci_cs.opcode_le_cs_write_cached_remote_fae_table(), 0x208F)
+    test.assert_eq(hci_cs.opcode_le_cs_create_config(), 0x2090)
+    test.assert_eq(hci_cs.opcode_le_cs_remove_config(), 0x2091)
+    test.assert_eq(hci_cs.opcode_le_cs_set_channel_classification(), 0x2092)
+    test.assert_eq(hci_cs.opcode_le_cs_set_procedure_parameters(), 0x2093)
+    test.assert_eq(hci_cs.opcode_le_cs_procedure_enable(), 0x2094)
+    test.assert_eq(hci_cs.opcode_le_cs_test(), 0x2095)
+    test.assert_eq(hci_cs.opcode_le_cs_test_end(), 0x2096)
+    test.assert_eq(hci_cs.opcode_le_cs_read_local_supported_capabilities_v2(), 0x20A5)
+    test.assert_eq(hci_cs.opcode_le_cs_write_cached_remote_supported_capabilities_v2(), 0x20A6)
+    test.assert_eq(hci_cs.opcode_le_cs_set_security_requirements(), 0x20A7)
+    test.assert_eq(hci_cs.opcode_le_cs_set_default_security_requirements(), 0x20A8)
+
+@test
+fn test_the_event_mask_holds_bits_43_to_50_and_55()
+    test.assert_eq(hci_cs.LE_EVENT_MASK_CS, 0xFF << 43)
+    test.assert_eq(hci_cs.LE_EVENT_MASK_CS_V2, 1 << 55)
+
+// ── The commands ────────────────────────────────────────────────────
+
+@test
+fn test_the_commands_without_parameters_are_empty()
+    test.assert_eq(hci_cs.cs_read_local_supported_capabilities(false).opcode, 0x2089)
+    test.assert_eq(hci_cs.cs_read_local_supported_capabilities(false).n, 0)
+    test.assert_eq(hci_cs.cs_read_local_supported_capabilities(true).opcode, 0x20A5)
+    test.assert_eq(hci_cs.cs_read_local_supported_capabilities(true).n, 0)
+    test.assert_eq(hci_cs.cs_test_end().opcode, 0x2096)
+    test.assert_eq(hci_cs.cs_test_end().n, 0)
+
+@test
+fn test_the_handle_commands_carry_a_12_bit_handle()
+    test.assert_eq(octets(hci_cs.cs_read_remote_supported_capabilities(0x0ABC)), [0xBC, 0x0A])
+    test.assert_eq(octets(hci_cs.cs_security_enable(0xFABC)), [0xBC, 0x0A])
+    test.assert_eq(octets(hci_cs.cs_read_remote_fae_table(0x0042)), [0x42, 0x00])
+    test.assert_eq(hci_cs.cs_security_enable(1).opcode, 0x208C)
+    test.assert_eq(hci_cs.cs_read_remote_fae_table(1).opcode, 0x208E)
+    test.assert_eq(hci_cs.cs_read_remote_supported_capabilities(1).opcode, 0x208A)
+
+@test
+fn test_set_default_settings_is_five_octets()
+    let c = hci_cs.cs_set_default_settings(0x0041, 3, 1, -5)
+    test.assert_eq(c.opcode, 0x208D)
+    test.assert_eq(octets(c), [0x41, 0x00, 0x03, 0x01, 0xFB])
+
+@test
+fn test_create_config_is_28_octets_in_the_order_of_the_command()
+    var cfg = hci_cs.cs_config_new(0x0040, 2, hci_cs.CS_ROLE_REFLECTOR)
+    let c = hci_cs.cs_create_config(cfg)
+    test.assert_eq(c.opcode, 0x2090)
+    test.assert_eq(c.n, 28)
+    let p = octets(c)
+    test.assert_eq(p[0:2], [0x40, 0x00])
+    // Config_ID, Create_Context, Main_Mode_Type, Sub_Mode_Type, Min and Max_Main_Mode_Steps, Main_Mode_Repetition, Mode_0_Steps, Role, RTT_Type, CS_SYNC_PHY.
+    test.assert_eq(p[2:13], [2, 1, 2, 0xFF, 1, 1, 1, 1, 1, 0, 1])
+    // The channel map of the 72 usable channels: channels 0 and 1, 23 to 25 and 77 and 78 are clear.
+    test.assert_eq(p[13:23], [0xFC, 0xFF, 0x7F, 0xFC, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x1F])
+    // Channel_Map_Repetition, Channel_Selection_Type, Ch3c_Shape, Ch3c_Jump, CS_Enhancements.
+    test.assert_eq(p[23:28], [3, 0, 0, 0, 0])
+
+@test
+fn test_the_full_channel_map_has_72_channels()
+    let m = hci_cs.cs_channel_map_all()
+    test.assert_eq(hci_cs.cs_channel_map_count(m), 72)
+    test.assert_eq(hci_cs.cs_channel_ok(1), false)
+    test.assert_eq(hci_cs.cs_channel_ok(2), true)
+    test.assert_eq(hci_cs.cs_channel_ok(22), true)
+    test.assert_eq(hci_cs.cs_channel_ok(23), false)
+    test.assert_eq(hci_cs.cs_channel_ok(25), false)
+    test.assert_eq(hci_cs.cs_channel_ok(26), true)
+    test.assert_eq(hci_cs.cs_channel_ok(76), true)
+    test.assert_eq(hci_cs.cs_channel_ok(77), false)
+
+@test
+fn test_remove_config_and_the_classification_and_the_enable()
+    test.assert_eq(octets(hci_cs.cs_remove_config(0x41, 3)), [0x41, 0x00, 3])
+    test.assert_eq(hci_cs.cs_remove_config(0x41, 3).opcode, 0x2091)
+    let cl = hci_cs.cs_set_channel_classification(hci_cs.cs_channel_map_all())
+    test.assert_eq(cl.opcode, 0x2092)
+    test.assert_eq(cl.n, 10)
+    test.assert_eq(octets(hci_cs.cs_procedure_enable(0x41, 1, true)), [0x41, 0x00, 1, 1])
+    test.assert_eq(octets(hci_cs.cs_procedure_enable(0x41, 1, false)), [0x41, 0x00, 1, 0])
+    test.assert_eq(hci_cs.cs_procedure_enable(1, 0, true).opcode, 0x2094)
+
+@test
+fn test_set_procedure_parameters_is_23_octets()
+    let p = hci_cs.cs_procedure_params_new(0x0041, 1, 5, 100, 2500)
+    let c = hci_cs.cs_set_procedure_parameters(p)
+    test.assert_eq(c.opcode, 0x2093)
+    test.assert_eq(c.n, 23)
+    // handle, Config_ID, Max_Procedure_Len 100, Min_Procedure_Interval 3, Max_Procedure_Interval 10, Max_Procedure_Count 5, the two subevent lengths of 2500
+    // microseconds (0x0009C4) in 3 octets, Tone_Antenna_Config_Selection 0, PHY 1, Tx_Power_Delta 0x80, Preferred_Peer_Antenna 1, the two SNR controls 0xFF.
+    test.assert_eq(octets(c), [0x41, 0x00, 1, 100, 0, 3, 0, 10, 0, 5, 0, 0xC4, 0x09, 0, 0xC4, 0x09, 0, 0, 1, 0x80, 1, 0xFF, 0xFF])
+
+@test
+fn test_cs_test_is_30_octets_and_its_overrides()
+    let t = hci_cs.HciCsTestParams { main_mode: 2, sub_mode: 0xFF, main_repetition: 1, mode0_steps: 1, role: 0, rtt_type: 0, sync_phy: 1, sync_antenna: 1,
+        subevent_len: 14500, subevent_interval: 0, max_subevents: 1, tx_power: 0, t_ip1: 145, t_ip2: 145, t_fcs: 150, t_pm: 40, t_sw: 0, antenna_config: 0,
+        enhancements: 0, snr_initiator: 0xFF, snr_reflector: 0xFF, drbg_nonce: 0x1234, channel_map_repetition: 3 }
+    let over = hci_cs.cs_test_override_map(hci_cs.cs_channel_map_all(), 0, 0, 0)
+    test.assert_eq(list.len(over), 13)
+    let c = hci_cs.cs_test(t, 0, over)
+    test.assert_eq(c.opcode, 0x2095)
+    test.assert_eq(c.n, 30 + 13)
+    let p = octets(c)
+    test.assert_eq(p[0:8], [2, 0xFF, 1, 1, 0, 0, 1, 1])
+    // Subevent_Len 14500 = 0x0038A4, Subevent_Interval 0, Max_Num_Subevents 1, Transmit_Power_Level 0.
+    test.assert_eq(p[8:15], [0xA4, 0x38, 0x00, 0x00, 0x00, 1, 0])
+    test.assert_eq(p[15:27], [145, 145, 150, 40, 0, 0, 0, 0xFF, 0xFF, 0x34, 0x12, 3])
+    // Override_Config 0, Override_Parameters_Length 13, then the data.
+    test.assert_eq(p[27:30], [0, 0, 13])
+    test.assert_eq(p[30:40], [0xFC, 0xFF, 0x7F, 0xFC, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x1F])
+    test.assert_eq(p[40:43], [0, 0, 0])
+
+@test
+fn test_security_requirements_carry_eight_octets()
+    let a = hci_cs.cs_set_security_requirements(0x41, 0x0B)
+    test.assert_eq(a.opcode, 0x20A7)
+    test.assert_eq(octets(a), [0x41, 0x00, 0x0B, 0, 0, 0, 0, 0, 0, 0])
+    let b = hci_cs.cs_set_default_security_requirements(0x0000000100000003)
+    test.assert_eq(b.opcode, 0x20A8)
+    test.assert_eq(octets(b), [3, 0, 0, 0, 1, 0, 0, 0])
+
+@test
+fn test_write_cached_fae_table_is_74_octets()
+    var t = hci_cs.cs_fae_zero()
+    t[0] = -3
+    t[71] = 5
+    let c = hci_cs.cs_write_cached_remote_fae_table(0x41, t)
+    test.assert_eq(c.opcode, 0x208F)
+    test.assert_eq(c.n, 74)
+    let p = octets(c)
+    test.assert_eq(p[2], 0xFD as u8)
+    test.assert_eq(p[73], 5 as u8)
+
+@test
+fn test_the_fae_table_lists_the_channels_2_to_22_then_26_to_76()
+    test.assert_eq(hci_cs.cs_fae_channel(0), 2)
+    test.assert_eq(hci_cs.cs_fae_channel(20), 22)
+    test.assert_eq(hci_cs.cs_fae_channel(21), 26)
+    test.assert_eq(hci_cs.cs_fae_channel(71), 76)
+
+@test
+fn test_cs_cmd_msg_is_the_message_a_transport_takes()
+    let m = hci_cs.cs_cmd_msg(hci_cs.cs_security_enable(0x41))
+    test.assert_eq(m.opcode, 0x208C)
+    test.assert_eq(m.params, [0x41, 0x00])
+    test.assert_eq(hci_frame.encode_hci_cmd_msg(m), [0x8C, 0x20, 2, 0x41, 0x00])
+
+// ── The capability record ───────────────────────────────────────────
+
+@test
+fn test_a_v1_record_is_read_from_a_command_complete_event()
+    var caps = hci_cs.cs_caps_none()
+    var status = 99
+    let evt = u8s(cat([0x0E, 31, 1, 0x89, 0x20, 0], caps_bytes_v1()))
+    test.assert_eq(hci_cs.cs_read_local_capabilities(evt, false, var caps, var status), true)
+    test.assert_eq(status, 0)
+    test.assert_eq(caps.v2, false)
+    test.assert_eq(caps.num_config, 1)
+    test.assert_eq(caps.max_procedures, 5)
+    test.assert_eq(caps.num_antennae, 2)
+    test.assert_eq(caps.max_antenna_paths, 3)
+    test.assert_eq(hci_cs.cs_caps_initiator(caps), true)
+    test.assert_eq(hci_cs.cs_caps_reflector(caps), true)
+    test.assert_eq(caps.modes, 1)
+    test.assert_eq(caps.rtt_capability, 0x40)
+    test.assert_eq(caps.rtt_aa_only_n, 30)
+    test.assert_eq(caps.rtt_sounding_n, 20)
+    test.assert_eq(caps.rtt_random_n, 10)
+    test.assert_eq(caps.nadm_sounding, 1)
+    test.assert_eq(caps.nadm_random, 3)
+    test.assert_eq(caps.sync_phys, 6)
+    test.assert_eq(caps.subfeatures, 0x12)
+    test.assert_eq(caps.t_ip1, 0x7C)
+    test.assert_eq(caps.t_ip2, 0x7E)
+    test.assert_eq(caps.t_fcs, 0x1E0)
+    test.assert_eq(caps.t_pm, 3)
+    test.assert_eq(caps.t_sw, 4)
+    test.assert_eq(caps.tx_snr, 0x1F)
+    // A [v1] record leaves the [v2] fields as a [v2] reader takes them: zero, and the 2M counts of the 1M ones.
+    test.assert_eq(caps.t_ip2_ipt, 0)
+    test.assert_eq(caps.t_sw_ipt, 0)
+    test.assert_eq(caps.rtt_2m_aa_only_n, 30)
+    test.assert_eq(caps.rtt_2m_sounding_n, 20)
+    test.assert_eq(caps.rtt_2m_random_n, 10)
+
+@test
+fn test_a_v2_record_reads_the_six_octets_more()
+    var caps = hci_cs.cs_caps_none()
+    var status = 99
+    let evt = u8s(cat([0x0E, 37, 1, 0xA5, 0x20, 0], caps_bytes_v2()))
+    test.assert_eq(hci_cs.cs_read_local_capabilities(evt, true, var caps, var status), true)
+    test.assert_eq(caps.v2, true)
+    test.assert_eq(caps.t_ip2_ipt, 0x30)
+    test.assert_eq(caps.t_sw_ipt, 2)
+    test.assert_eq(caps.rtt_2m_aa_only_n, 31)
+    test.assert_eq(caps.rtt_2m_sounding_n, 21)
+    test.assert_eq(caps.rtt_2m_random_n, 11)
+
+@test
+fn test_a_failed_read_local_capabilities_gives_the_status_and_no_record()
+    var caps = hci_cs.cs_caps_none()
+    var status = 0
+    test.assert_eq(hci_cs.cs_read_local_capabilities(u8s([0x0E, 4, 1, 0x89, 0x20, 0x0C]), false, var caps, var status), true)
+    test.assert_eq(status, 0x0C)
+    test.assert_eq(caps.num_config, 0)
+
+@test
+fn test_read_local_capabilities_refuses_another_event_and_a_short_record()
+    var caps = hci_cs.cs_caps_none()
+    var status = 0
+    test.assert_eq(hci_cs.cs_read_local_capabilities(u8s(cat([0x0E, 31, 1, 0x8A, 0x20, 0], caps_bytes_v1())), false, var caps, var status), false)
+    test.assert_eq(hci_cs.cs_read_local_capabilities(u8s(cat([0x0E, 31, 1, 0x89, 0x20, 0], caps_bytes_v1())), true, var caps, var status), false)
+    test.assert_eq(hci_cs.cs_read_local_capabilities(u8s(cat([0x0E, 30, 1, 0x89, 0x20, 0], rep(0, 27))), false, var caps, var status), false)
+    test.assert_eq(hci_cs.cs_read_local_capabilities(u8s([0x0F, 4, 0, 1, 0x89, 0x20]), false, var caps, var status), false)
+
+@test
+fn test_write_cached_capabilities_returns_the_record_it_was_read_as()
+    var caps = hci_cs.cs_caps_none()
+    var status = 0
+    let evt = u8s(cat([0x0E, 37, 1, 0xA5, 0x20, 0], caps_bytes_v2()))
+    test.assert_eq(hci_cs.cs_read_local_capabilities(evt, true, var caps, var status), true)
+    let w1 = hci_cs.cs_write_cached_remote_supported_capabilities(0x41, caps, false)
+    test.assert_eq(w1.opcode, 0x208B)
+    test.assert_eq(w1.n, 30)
+    test.assert_eq(octets(w1)[2:30], u8s(caps_bytes_v1()))
+    let w2 = hci_cs.cs_write_cached_remote_supported_capabilities(0x41, caps, true)
+    test.assert_eq(w2.opcode, 0x20A6)
+    test.assert_eq(w2.n, 36)
+    test.assert_eq(octets(w2)[2:36], u8s(caps_bytes_v2()))
+
+// ── The other events ────────────────────────────────────────────────
+
+@test
+fn test_the_remote_capabilities_event_in_both_forms()
+    var out = hci_cs.HciCsRemoteCapabilities { status: 0, handle: 0, caps: hci_cs.cs_caps_none() }
+    let v1 = meta(0x2C, cat([0, 0x41, 0x00], caps_bytes_v1()))
+    test.assert_eq(list.len(v1), 34)
+    test.assert_eq(hci_cs.cs_read_remote_capabilities(v1, var out), true)
+    test.assert_eq(out.handle, 0x41)
+    test.assert_eq(out.caps.v2, false)
+    test.assert_eq(out.caps.rtt_aa_only_n, 30)
+    let v2 = meta(0x38, cat([0, 0x41, 0x00], caps_bytes_v2()))
+    test.assert_eq(list.len(v2), 40)
+    test.assert_eq(hci_cs.cs_read_remote_capabilities(v2, var out), true)
+    test.assert_eq(out.caps.v2, true)
+    test.assert_eq(out.caps.rtt_2m_random_n, 11)
+    // A status other than success is read as it is.
+    let bad = meta(0x2C, cat([0x11, 0x41, 0x00], rep(0, 28)))
+    test.assert_eq(hci_cs.cs_read_remote_capabilities(bad, var out), true)
+    test.assert_eq(out.status, 0x11)
+
+@test
+fn test_the_fae_table_event_is_78_octets()
+    var out = hci_cs.cs_remote_fae_new()
+    var p = [0, 0x41, 0x00]
+    for i in 0..72
+        list.push(p, i)
+    p[3 + 1] = 0xFE
+    let e = meta(0x2D, p)
+    test.assert_eq(list.len(e), 78)
+    test.assert_eq(hci_cs.cs_read_remote_fae(e, var out), true)
+    test.assert_eq(out.handle, 0x41)
+    test.assert_eq(out.table[0], 0)
+    test.assert_eq(out.table[1], -2)
+    test.assert_eq(out.table[71], 71)
+
+@test
+fn test_the_security_enable_complete_event()
+    var out = hci_cs.HciCsSecurityComplete { status: 9, handle: 0 }
+    test.assert_eq(hci_cs.cs_read_security_enable_complete(meta(0x2E, [0, 0x41, 0x00]), var out), true)
+    test.assert_eq(out.status, 0)
+    test.assert_eq(out.handle, 0x41)
+    test.assert_eq(hci_cs.cs_read_security_enable_complete(meta(0x2E, [0x2F, 0x41, 0x00]), var out), true)
+    test.assert_eq(out.status, 0x2F)
+
+@test
+fn test_the_config_complete_event_is_34_octets_of_parameters()
+    var out = hci_cs.cs_config_complete_new()
+    let map = [0xFC, 0xFF, 0x7F, 0xFC, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x1F]
+    // Status, handle, Config_ID, Action, the nine fields of the configuration, the map, the five fields after it, and the four times.
+    let p = cat(cat(cat([0, 0x41, 0x00, 2, 1, 2, 0xFF, 1, 1, 1, 1, 0, 0, 1], map), [3, 1, 1, 4, 1]), [145, 145, 150, 40])
+    let e = meta(0x2F, p)
+    test.assert_eq(list.len(e), 36)
+    test.assert_eq(hci_cs.cs_read_config_complete(e, var out), true)
+    test.assert_eq(out.status, 0)
+    test.assert_eq(out.action, 1)
+    test.assert_eq(out.cfg.handle, 0x41)
+    test.assert_eq(out.cfg.config_id, 2)
+    test.assert_eq(out.cfg.main_mode, 2)
+    test.assert_eq(out.cfg.sub_mode, 0xFF)
+    test.assert_eq(out.cfg.role, 0)
+    test.assert_eq(out.cfg.rtt_type, 0)
+    test.assert_eq(out.cfg.sync_phy, 1)
+    test.assert_eq(hci_cs.cs_channel_map_count(out.cfg.channel_map), 72)
+    test.assert_eq(out.cfg.channel_map_repetition, 3)
+    test.assert_eq(out.cfg.channel_selection, 1)
+    test.assert_eq(out.cfg.ch3c_shape, 1)
+    test.assert_eq(out.cfg.ch3c_jump, 4)
+    test.assert_eq(out.cfg.enhancements, 1)
+    test.assert_eq(out.t_ip1_us, 145)
+    test.assert_eq(out.t_ip2_us, 145)
+    test.assert_eq(out.t_fcs_us, 150)
+    test.assert_eq(out.t_pm_us, 40)
+
+@test
+fn test_the_procedure_enable_complete_event_is_22_octets_of_parameters()
+    var out = hci_cs.cs_procedure_enable_complete_new()
+    // Status, handle, Config_ID 1, State 1, Tone_Antenna_Config_Selection 2, Selected_TX_Power -4, Subevent_Len 2500, Subevents_Per_Event 1,
+    // Subevent_Interval 0, Event_Interval 1, Procedure_Interval 3, Procedure_Count 5, Max_Procedure_Len 100.
+    let p = [0, 0x41, 0x00, 1, 1, 2, 0xFC, 0xC4, 0x09, 0x00, 1, 0, 0, 1, 0, 3, 0, 5, 0, 100, 0]
+    let e = meta(0x30, p)
+    test.assert_eq(list.len(e), 24)
+    test.assert_eq(hci_cs.cs_read_procedure_enable_complete(e, var out), true)
+    test.assert_eq(out.handle, 0x41)
+    test.assert_eq(out.config_id, 1)
+    test.assert_eq(out.state, 1)
+    test.assert_eq(out.antenna_config, 2)
+    test.assert_eq(out.selected_tx_power, -4)
+    test.assert_eq(out.subevent_len, 2500)
+    test.assert_eq(out.subevents_per_event, 1)
+    test.assert_eq(out.subevent_interval, 0)
+    test.assert_eq(out.event_interval, 1)
+    test.assert_eq(out.procedure_interval, 3)
+    test.assert_eq(out.procedure_count, 5)
+    test.assert_eq(out.max_procedure_len, 100)
+
+@test
+fn test_the_test_end_complete_event_gives_its_status()
+    test.assert_eq(hci_cs.cs_read_test_end_complete(meta(0x33, [0])), 0)
+    test.assert_eq(hci_cs.cs_read_test_end_complete(meta(0x33, [0x0C])), 0x0C)
+    test.assert_eq(hci_cs.cs_read_test_end_complete(meta(0x33, [0, 0])), -1)
+    test.assert_eq(hci_cs.cs_read_test_end_complete(meta(0x2E, [0])), -1)
+
+@test
+fn test_the_event_readers_refuse_the_wrong_event_and_the_wrong_length()
+    var sec = hci_cs.HciCsSecurityComplete { status: 0, handle: 0 }
+    var cfg = hci_cs.cs_config_complete_new()
+    var pe = hci_cs.cs_procedure_enable_complete_new()
+    var fae = hci_cs.cs_remote_fae_new()
+    var rc = hci_cs.HciCsRemoteCapabilities { status: 0, handle: 0, caps: hci_cs.cs_caps_none() }
+    test.assert_eq(hci_cs.cs_read_security_enable_complete(meta(0x2E, [0, 0x41]), var sec), false)
+    test.assert_eq(hci_cs.cs_read_security_enable_complete(meta(0x2F, [0, 0x41, 0]), var sec), false)
+    test.assert_eq(hci_cs.cs_read_config_complete(meta(0x2F, rep(0, 32)), var cfg), false)
+    test.assert_eq(hci_cs.cs_read_config_complete(meta(0x30, rep(0, 33)), var cfg), false)
+    test.assert_eq(hci_cs.cs_read_procedure_enable_complete(meta(0x30, rep(0, 19)), var pe), false)
+    test.assert_eq(hci_cs.cs_read_remote_fae(meta(0x2D, rep(0, 73)), var fae), false)
+    test.assert_eq(hci_cs.cs_read_remote_capabilities(meta(0x2C, rep(0, 29)), var rc), false)
+    test.assert_eq(hci_cs.cs_read_remote_capabilities(meta(0x38, rep(0, 36)), var rc), false)
+    // An event whose length octet is not its length is no LE Meta event of this module.
+    var bad = meta(0x2E, [0, 0x41, 0])
+    bad[1] = 5
+    test.assert_eq(hci_cs.cs_read_security_enable_complete(bad, var sec), false)
+    test.assert_eq(hci_cs.cs_subevent(bad), -1)
+    test.assert_eq(hci_cs.cs_subevent(u8s([0x05, 4, 0, 0, 0, 0])), -1)
+
+@test
+fn test_the_codes_of_the_nine_events_are_told()
+    test.assert_eq(hci_cs.cs_is_event(0x2C), true)
+    test.assert_eq(hci_cs.cs_is_event(0x33), true)
+    test.assert_eq(hci_cs.cs_is_event(0x38), true)
+    test.assert_eq(hci_cs.cs_is_event(0x34), false)
+    test.assert_eq(hci_cs.cs_is_event(0x2B), false)
+
+// ── The data of a step ──────────────────────────────────────────────
+
+@test
+fn test_the_data_length_of_a_step_follows_its_mode_and_role()
+    test.assert_eq(hci_cs.cs_step_data_len(0, true, false, 1), 5)
+    test.assert_eq(hci_cs.cs_step_data_len(0, false, false, 1), 3)
+    test.assert_eq(hci_cs.cs_step_data_len(1, true, false, 1), 6)
+    test.assert_eq(hci_cs.cs_step_data_len(1, false, true, 1), 14)
+    test.assert_eq(hci_cs.cs_step_data_len(2, true, false, 1), 9)
+    test.assert_eq(hci_cs.cs_step_data_len(2, true, false, 4), 21)
+    test.assert_eq(hci_cs.cs_step_data_len(3, true, false, 1), 15)
+    test.assert_eq(hci_cs.cs_step_data_len(3, true, true, 4), 35)
+
+@test
+fn test_the_fields_of_a_pct_and_a_tone_quality()
+    // I = -1 (0xFFF), Q = 2 in a raw 24-bit term.
+    let pct = 0xFFF | (2 << 12)
+    test.assert_eq(hci_cs.cs_pct_i(pct), -1)
+    test.assert_eq(hci_cs.cs_pct_q(pct), 2)
+    test.assert_eq(hci_cs.cs_pct_i(0x7FF), 2047)
+    test.assert_eq(hci_cs.cs_pct_i(0x800), -2048)
+    test.assert_eq(hci_cs.cs_pct_q(0x800 << 12), -2048)
+    test.assert_eq(hci_cs.cs_tq_quality(0x20), 0)
+    test.assert_eq(hci_cs.cs_tq_extension(0x20), 2)
+    test.assert_eq(hci_cs.cs_tq_quality(0x13), 3)
+    test.assert_eq(hci_cs.cs_tq_extension(0x13), 1)
+    test.assert_eq(hci_cs.cs_s15(0x2710), 10000)
+    test.assert_eq(hci_cs.cs_s15(0x58F0), -10000)
+    test.assert_eq(hci_cs.cs_s16(0xFFFE), -2)
+    test.assert_eq(hci_cs.cs_s16(0x0003), 3)
+
+// ── A result event ──────────────────────────────────────────────────
+
+// A Subevent Result event: the 16 octets of header and `steps`.
+fn result_event(procedure_done: Int, subevent_done: Int, abort: Int, n_ap: Int, n: Int, steps: [Int]) -> [u8]
+    let head = [0x41, 0x00, 2, 0x34, 0x12, 0x07, 0x00, 0xF0, 0x2E, 0xE2, procedure_done, subevent_done, abort, n_ap, n]
+    meta(0x31, cat(head, steps))
+
+fn continue_event(procedure_done: Int, subevent_done: Int, abort: Int, n_ap: Int, n: Int, steps: [Int]) -> [u8]
+    meta(0x32, cat([0x41, 0x00, 2, procedure_done, subevent_done, abort, n_ap, n], steps))
+
+// The steps of a subevent of an initiator: a mode 0 step, a mode 1 step and a mode 2 step of one antenna path, then an aborted mode 2 step.
+fn initiator_steps() -> [Int]
+    var s: [Int] = []
+    // mode 0, channel 4: Packet_Quality 0, Packet_RSSI -40, Packet_Antenna 1, Measured_Freq_Offset 150 (0.01 ppm units).
+    s = cat(s, [0, 4, 5, 0x00, 0xD8, 0x01, 0x96, 0x00])
+    // mode 1, channel 9: quality 0, NADM 0xFF, RSSI -41, ToA_ToD -3, antenna 1.
+    s = cat(s, [1, 9, 6, 0x00, 0xFF, 0xD7, 0xFD, 0xFF, 0x01])
+    // mode 2, channel 12: permutation 5, two slots: PCT I=100 Q=-100, quality high; extension slot I=0 Q=0, extension with a tone expected, quality 3.
+    s = cat(s, [2, 12, 9, 5, 100, 0xC0, 0xF9, 0x00, 0, 0, 0, 0x23])
+    // mode 2, channel 30: aborted, no data.
+    s = cat(s, [2, 30, 0])
+    s
+
+@test
+fn test_a_subevent_result_event_keeps_the_step_data_of_each_mode()
+    var r = hci_cs.cs_result_event_new()
+    let e = result_event(1, 0, 0, 1, 4, initiator_steps())
+    test.assert_eq(list.len(e), 2 + 1 + 15 + 8 + 9 + 12 + 3)
+    test.assert_eq(hci_cs.cs_read_result(e, var r), true)
+    test.assert_eq(r.cont, false)
+    test.assert_eq(r.handle, 0x41)
+    test.assert_eq(r.config_id, 2)
+    test.assert_eq(r.start_acl_event, 0x1234)
+    test.assert_eq(r.procedure_counter, 7)
+    test.assert_eq(r.frequency_compensation, 0x2EF0)
+    test.assert_eq(r.reference_power, -30)
+    test.assert_eq(r.procedure_done, 1)
+    test.assert_eq(r.subevent_done, 0)
+    test.assert_eq(r.num_antenna_paths, 1)
+    test.assert_eq(r.n_steps, 4)
+    // mode 0 of an initiator.
+    test.assert_eq(r.steps[0].mode, 0)
+    test.assert_eq(r.steps[0].channel, 4)
+    test.assert_eq(r.steps[0].quality, 0)
+    test.assert_eq(r.steps[0].rssi, -40)
+    test.assert_eq(r.steps[0].antenna, 1)
+    test.assert_eq(r.steps[0].has_ffo, true)
+    test.assert_eq(hci_cs.cs_s15(r.steps[0].ffo), 150)
+    // mode 1.
+    test.assert_eq(r.steps[1].mode, 1)
+    test.assert_eq(r.steps[1].channel, 9)
+    test.assert_eq(r.steps[1].nadm, 0xFF)
+    test.assert_eq(r.steps[1].rssi, -41)
+    test.assert_eq(hci_cs.cs_s16(r.steps[1].time_diff), -3)
+    test.assert_eq(r.steps[1].antenna, 1)
+    test.assert_eq(r.steps[1].has_pct, false)
+    // mode 2: the permutation, two slots, the second the tone extension slot.
+    test.assert_eq(r.steps[2].mode, 2)
+    test.assert_eq(r.steps[2].permutation, 5)
+    test.assert_eq(r.steps[2].slots, 2)
+    test.assert_eq(hci_cs.cs_pct_i(r.steps[2].pct[0]), 100)
+    test.assert_eq(hci_cs.cs_pct_q(r.steps[2].pct[0]), -100)
+    test.assert_eq(hci_cs.cs_tq_quality(r.steps[2].tq[0]), 0)
+    test.assert_eq(hci_cs.cs_tq_quality(r.steps[2].tq[1]), 3)
+    test.assert_eq(hci_cs.cs_tq_extension(r.steps[2].tq[1]), 2)
+    // The aborted step.
+    test.assert_eq(r.steps[3].aborted, true)
+    test.assert_eq(r.steps[3].valid, true)
+    test.assert_eq(r.steps[3].channel, 30)
+
+@test
+fn test_a_reflector_mode_0_step_has_no_frequency_offset()
+    var r = hci_cs.cs_result_event_new()
+    let e = result_event(0, 0, 0, 1, 1, [0, 7, 3, 0x01, 0xD0, 0x01])
+    test.assert_eq(hci_cs.cs_read_result(e, var r), true)
+    test.assert_eq(r.steps[0].has_ffo, false)
+    test.assert_eq(r.steps[0].quality, 1)
+    test.assert_eq(r.steps[0].rssi, -48)
+
+@test
+fn test_a_mode_1_step_with_a_sounding_sequence_holds_two_terms()
+    var r = hci_cs.cs_result_event_new()
+    let data = [0x00, 0xFF, 0xD7, 0x04, 0x00, 0x01, 0x11, 0x22, 0x33, 0x00, 0xFF, 0xFF, 0xFF, 0xFF]
+    let e = result_event(0, 0, 0, 1, 1, cat([1, 9, 14], data))
+    test.assert_eq(hci_cs.cs_read_result(e, var r), true)
+    test.assert_eq(r.steps[0].has_pct, true)
+    test.assert_eq(r.steps[0].pct1, 0x00332211)
+    test.assert_eq(r.steps[0].pct2, hci_cs.CS_PCT_NA)
+    test.assert_eq(hci_cs.cs_s16(r.steps[0].time_diff), 4)
+
+@test
+fn test_a_mode_3_step_is_told_from_the_antenna_paths_of_the_event()
+    var r = hci_cs.cs_result_event_new()
+    // One antenna path: two slots.  Without the terms the step holds 7 + 8 = 15 octets, with them 23.
+    let plain = [0x00, 0xFF, 0xD7, 0x04, 0x00, 0x01, 0x03, 0x10, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x23]
+    // That is 6 + 1 + 2 * 4 = 15; the list above is 18 long, so it is cut to the 15.
+    var p15: [Int] = []
+    for i in 0..15
+        list.push(p15, plain[i])
+    p15[8] = 0x00
+    let e = result_event(0, 0, 0, 1, 1, cat([3, 20, 15], p15))
+    test.assert_eq(hci_cs.cs_read_result(e, var r), true)
+    test.assert_eq(r.steps[0].mode, 3)
+    test.assert_eq(r.steps[0].has_pct, false)
+    test.assert_eq(r.steps[0].slots, 2)
+    test.assert_eq(r.steps[0].permutation, 3)
+    test.assert_eq(r.steps[0].antenna, 1)
+    // The same octets with eight more after the terms' place read as the sounding form.
+    var p23: [Int] = []
+    for i in 0..6
+        list.push(p23, p15[i])
+    p23 = cat(p23, [0xAA, 0, 0, 0, 0xBB, 0, 0, 0])
+    for i in 6..15
+        list.push(p23, p15[i])
+    let e2 = result_event(0, 0, 0, 1, 1, cat([3, 20, 23], p23))
+    test.assert_eq(hci_cs.cs_read_result(e2, var r), true)
+    test.assert_eq(r.steps[0].has_pct, true)
+    test.assert_eq(r.steps[0].pct1, 0xAA)
+    test.assert_eq(r.steps[0].pct2, 0xBB)
+    test.assert_eq(r.steps[0].slots, 2)
+    // An event that says three paths cannot hold a 15 octet mode 3 step.
+    let e3 = result_event(0, 0, 0, 3, 1, cat([3, 20, 15], p15))
+    test.assert_eq(hci_cs.cs_read_result(e3, var r), false)
+
+@test
+fn test_a_continue_event_has_the_short_header()
+    var r = hci_cs.cs_result_event_new()
+    let e = continue_event(0, 0, 0, 1, 1, [0, 4, 3, 0, 0xD8, 1])
+    test.assert_eq(list.len(e), 3 + 8 + 6)
+    test.assert_eq(hci_cs.cs_read_result(e, var r), true)
+    test.assert_eq(r.cont, true)
+    test.assert_eq(r.handle, 0x41)
+    test.assert_eq(r.config_id, 2)
+    test.assert_eq(r.procedure_counter, 0)
+    test.assert_eq(r.n_steps, 1)
+    test.assert_eq(r.steps[0].channel, 4)
+
+@test
+fn test_the_abort_reasons_are_the_two_nibbles()
+    var r = hci_cs.cs_result_event_new()
+    let e = result_event(0xF, 0xF, 0x32, 1, 0, [])
+    test.assert_eq(hci_cs.cs_read_result(e, var r), true)
+    test.assert_eq(r.abort_procedure, 2)
+    test.assert_eq(r.abort_subevent, 3)
+    test.assert_eq(r.n_steps, 0)
+
+@test
+fn test_a_result_event_that_breaks_a_rule_is_refused()
+    var r = hci_cs.cs_result_event_new()
+    // The pair of done statuses Table 7.2 does not allow: the procedure complete while the subevent is partial; and a reserved value.
+    test.assert_eq(hci_cs.cs_read_result(result_event(0, 1, 0, 1, 0, []), var r), false)
+    test.assert_eq(hci_cs.cs_read_result(result_event(0xF, 1, 0, 1, 0, []), var r), false)
+    test.assert_eq(hci_cs.cs_read_result(result_event(2, 0, 0, 1, 0, []), var r), false)
+    test.assert_eq(hci_cs.cs_read_result(result_event(0, 5, 0, 1, 0, []), var r), false)
+    // A count that the octets do not fill, and octets the count does not name.
+    test.assert_eq(hci_cs.cs_read_result(result_event(0, 0, 0, 1, 2, [0, 4, 3, 0, 0xD8, 1]), var r), false)
+    test.assert_eq(hci_cs.cs_read_result(result_event(0, 0, 0, 1, 1, [0, 4, 3, 0, 0xD8, 1, 0]), var r), false)
+    // A step whose data runs past the event, a mode beyond 3 and a length no mode 0 step has.
+    test.assert_eq(hci_cs.cs_read_result(result_event(0, 0, 0, 1, 1, [0, 4, 5, 0, 0xD8]), var r), false)
+    test.assert_eq(hci_cs.cs_read_result(result_event(0, 0, 0, 1, 1, [4, 4, 3, 0, 0xD8, 1]), var r), false)
+    test.assert_eq(hci_cs.cs_read_result(result_event(0, 0, 0, 1, 1, [0, 4, 4, 0, 0xD8, 1, 1]), var r), false)
+    // More steps than an event can hold, and another event.
+    test.assert_eq(hci_cs.cs_read_result(result_event(0, 0, 0, 1, 81, []), var r), false)
+    test.assert_eq(hci_cs.cs_read_result(meta(0x33, [0]), var r), false)
+    test.assert_eq(hci_cs.cs_read_result(meta(0x31, rep(0, 5)), var r), false)
+
+// ── The result of a procedure ───────────────────────────────────────
+
+@test
+fn test_a_procedure_result_joins_the_events_of_its_subevents()
+    var res = hci_cs.cs_proc_result_new()
+    var ev = hci_cs.cs_result_event_new()
+    // Subevent 0: a Result with the first two steps (partial) and a Continue with the third and the aborted fourth (complete); the procedure goes on.
+    let steps = initiator_steps()
+    var first: [Int] = []
+    for i in 0..(8 + 9)
+        list.push(first, steps[i])
+    var second: [Int] = []
+    for i in (8 + 9)..list.len(steps)
+        list.push(second, steps[i])
+    test.assert_eq(hci_cs.cs_read_result(result_event(1, 1, 0, 1, 2, first), var ev), true)
+    test.assert_eq(hci_cs.cs_proc_add(var res, ev), 0)
+    test.assert_eq(res.complete, false)
+    test.assert_eq(res.open, true)
+    test.assert_eq(hci_cs.cs_read_result(continue_event(1, 0, 0, 1, 2, second), var ev), true)
+    test.assert_eq(hci_cs.cs_proc_add(var res, ev), 0)
+    test.assert_eq(res.open, false)
+    test.assert_eq(res.complete, false)
+    test.assert_eq(res.n_sub, 1)
+    test.assert_eq(res.n_steps, 4)
+    test.assert_eq(res.subs[0].count, 4)
+    test.assert_eq(res.subs[0].first, 0)
+    test.assert_eq(res.subs[0].done, 0)
+    test.assert_eq(res.handle, 0x41)
+    test.assert_eq(res.config_id, 2)
+    test.assert_eq(res.procedure_counter, 7)
+    test.assert_eq(res.num_antenna_paths, 1)
+    // Subevent 1: one Result, the last of the procedure.
+    test.assert_eq(hci_cs.cs_read_result(result_event(0, 0, 0, 1, 1, [0, 7, 3, 0x01, 0xD0, 0x01]), var ev), true)
+    test.assert_eq(hci_cs.cs_proc_add(var res, ev), 0)
+    test.assert_eq(res.complete, true)
+    test.assert_eq(res.aborted, false)
+    test.assert_eq(res.n_sub, 2)
+    test.assert_eq(res.n_steps, 5)
+    test.assert_eq(res.subs[1].first, 4)
+    test.assert_eq(res.subs[1].count, 1)
+    test.assert_eq(res.steps[4].channel, 7)
+    test.assert_eq(res.steps[2].mode, 2)
+
+@test
+fn test_a_procedure_result_refuses_a_stray_continue_and_another_procedure()
+    var res = hci_cs.cs_proc_result_new()
+    var ev = hci_cs.cs_result_event_new()
+    test.assert_eq(hci_cs.cs_read_result(continue_event(0, 0, 0, 1, 0, []), var ev), true)
+    test.assert_eq(hci_cs.cs_proc_add(var res, ev), 1)
+    test.assert_eq(hci_cs.cs_read_result(result_event(1, 0, 0, 1, 0, []), var ev), true)
+    test.assert_eq(hci_cs.cs_proc_add(var res, ev), 0)
+    // The next Result has another Procedure_Counter.
+    let other = meta(0x31, [0x41, 0x00, 2, 0x34, 0x12, 0x08, 0x00, 0xF0, 0x2E, 0xE2, 0, 0, 0, 1, 0])
+    test.assert_eq(hci_cs.cs_read_result(other, var ev), true)
+    test.assert_eq(hci_cs.cs_proc_add(var res, ev), 2)
+
+@test
+fn test_a_procedure_the_controller_aborted_is_complete_and_aborted()
+    var res = hci_cs.cs_proc_result_new()
+    var ev = hci_cs.cs_result_event_new()
+    test.assert_eq(hci_cs.cs_read_result(result_event(0xF, 0xF, 0x32, 1, 0, []), var ev), true)
+    test.assert_eq(hci_cs.cs_proc_add(var res, ev), 0)
+    test.assert_eq(res.complete, true)
+    test.assert_eq(res.aborted, true)
+    test.assert_eq(res.subs[0].abort_subevent, 3)
+    hci_cs.cs_proc_clear(var res)
+    test.assert_eq(res.complete, false)
+    test.assert_eq(res.n_sub, 0)
+    test.assert_eq(res.n_steps, 0)
+
+@test
+fn test_a_procedure_is_cut_at_the_limits_of_core()
+    var res = hci_cs.cs_proc_result_new()
+    var ev = hci_cs.cs_result_event_new()
+    var data: [Int] = []
+    for _ in 0..39
+        data = cat(data, [0, 4, 3, 0, 0xD8, 1])
+    test.assert_eq(hci_cs.cs_read_result(result_event(1, 0, 0, 1, 39, data), var ev), true)
+    // 39 steps in each of seven subevents is 273 steps: the limit of a procedure is 256.
+    for _ in 0..6
+        test.assert_eq(hci_cs.cs_proc_add(var res, ev), 0)
+    test.assert_eq(res.n_steps, 234)
+    test.assert_eq(hci_cs.cs_proc_add(var res, ev), 3)
+    test.assert_eq(res.overflow, true)
+    test.assert_eq(res.n_steps, 256)
+    test.assert_eq(res.subs[6].count, 22)
+
+@test
+fn test_the_data_octets_of_a_step_are_the_ones_it_was_read_from()
+    // Every form of step the module reads is written back to the same octets: mode 0 of both roles, mode 1 with and without the terms, mode 2, mode 3 with and without
+    // the terms, and an aborted step.
+    var s = hci_cs.cs_step_new()
+    let modes = [0, 0, 1, 1, 2, 3, 3]
+    let datas = [[0x01, 0xD0, 0x01], [0x00, 0xD8, 0x01, 0x96, 0x00], [0x00, 0xFF, 0xD7, 0xFD, 0xFF, 0x01],
+                 [0x00, 0xFF, 0xD7, 0x04, 0x00, 0x01, 0x11, 0x22, 0x33, 0x00, 0xFF, 0xFF, 0xFF, 0xFF],
+                 [5, 100, 0xC0, 0xF9, 0x00, 0, 0, 0, 0x23],
+                 [0x00, 0xFF, 0xD7, 0x04, 0x00, 0x01, 3, 0x10, 0x20, 0x30, 0x00, 0, 0, 0, 0x23],
+                 [0x00, 0xFF, 0xD7, 0x04, 0x00, 0x01, 0xAA, 0, 0, 0, 0xBB, 0, 0, 0, 3, 0x10, 0x20, 0x30, 0x00, 0, 0, 0, 0x23]]
+    for k in 0..7
+        let octets = u8s(datas[k])
+        test.assert_eq(hci_cs.cs_step_data_read(octets, 0, list.len(octets), modes[k], 1, var s), true)
+        test.assert_eq(hci_cs.cs_step_data_octets(s), octets)
+    test.assert_eq(hci_cs.cs_step_data_read([], 0, 0, 2, 1, var s), true)
+    test.assert_eq(s.aborted, true)
+    test.assert_eq(list.len(hci_cs.cs_step_data_octets(s)), 0)
+
+@test
+fn test_the_fae_index_is_the_inverse_of_the_channel_of_an_entry()
+    for i in 0..72
+        test.assert_eq(hci_cs.cs_fae_index(hci_cs.cs_fae_channel(i)), i)
+    test.assert_eq(hci_cs.cs_fae_index(0), -1)
+    test.assert_eq(hci_cs.cs_fae_index(23), -1)
+    test.assert_eq(hci_cs.cs_fae_index(25), -1)
+    test.assert_eq(hci_cs.cs_fae_index(77), -1)
+    test.assert_eq(hci_cs.cs_s8(0xD8), -40)
+    test.assert_eq(hci_cs.cs_s8(0x14), 20)

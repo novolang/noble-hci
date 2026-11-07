@@ -1,0 +1,1411 @@
+// src/hci_cs.nv — the Host side of the HCI of Channel Sounding: the eighteen commands as builders, the events as readers, and the
+// records that hold what they carry.
+//
+// [Vol 4] Part E, Sections 7.7.65.39 to 7.7.65.46, 7.8.130 to 7.8.143, 7.8.157 and 7.8.158; the layouts follow the tables of Core 6.3 and
+// agree octet for octet with the Controller that answers them (`orbit/noble-controller/src/ll_cs_hci.nv`, `ll_cs_res.nv`).  A multi-octet
+// field is least significant octet first.
+//
+// What is here, in the order of a session:
+//
+//   commands    `cs_<name>(...)` returns a `HciCsCmd`: the opcode and the parameter octets in a buffer of 256.  `cs_cmd_msg` turns it into the
+//               `HciCmdMsg` a transport takes.  The eighteen opcodes are `opcode_le_cs_<name>()`.
+//   caps        `HciCsCaps`, the capability record of LE CS Read Local Supported Capabilities and of the Read Remote event, in its [v1] and [v2]
+//               forms, read from a Command Complete event or an LE Meta event and written for LE CS Write Cached Remote Supported Capabilities.
+//   events      `cs_read_*` read the events 0x2C, 0x38, 0x2D, 0x2E, 0x2F, 0x30 and 0x33 of an LE Meta event packet (event code 0x3E, length,
+//               subevent code, parameters) into a record; `cs_read_result` reads a Subevent Result (0x31) or a Subevent Result Continue (0x32)
+//               into a `HciCsResultEvent` that keeps the data of each step as a `HciCsStep`.
+//   result      `HciCsProcResult` is the Host-side result of a procedure: the steps of every subevent in order, with the header of each subevent.
+//               The functions that fill it from the events are `cs_proc_begin` and `cs_proc_add`; `orbit/noble/src/cs_gap.nv` drives them.
+//
+// A step is read from the length it carries: mode 0 holds 3 octets (the reflector) or 5 (the initiator), mode 1 holds 6 (14 with the two
+// phase correction terms of a sounding sequence), mode 2 holds a permutation index and a tone slot of 4 octets for each of the antenna
+// paths and the tone extension slot, and mode 3 holds the mode 1 octets, the permutation index and the tone slots.  Mode 3 is told from
+// its length and the number of antenna paths of the event.  A step with no data octets is a step the Controller aborted.
+//
+// All records are fixed-capacity: the buffers are `Vec`s of the size Core gives (a subevent holds at most 160 steps, a procedure 256 and
+// 32 subevents, a tone step 5 slots) and no function of this module appends to a list.  The builders and readers do not allocate on the
+// heap but for the `[u8]` of `cs_cmd_msg`, which the transport needs.
+
+use hci_commands
+use hci_frame
+
+// ── The opcodes ─────────────────────────────────────────────────────
+
+// LE CS Read Local Supported Capabilities [v1], 0x2089 ([Vol 4] Part E, Section 7.8.130).
+pub @tier(embedded)
+@no_alloc
+fn opcode_le_cs_read_local_supported_capabilities() -> Int
+    (0x08 << 10) | 0x089
+
+// LE CS Read Remote Supported Capabilities, 0x208A (7.8.131).
+pub @tier(embedded)
+@no_alloc
+fn opcode_le_cs_read_remote_supported_capabilities() -> Int
+    (0x08 << 10) | 0x08A
+
+// LE CS Write Cached Remote Supported Capabilities [v1], 0x208B (7.8.132).
+pub @tier(embedded)
+@no_alloc
+fn opcode_le_cs_write_cached_remote_supported_capabilities() -> Int
+    (0x08 << 10) | 0x08B
+
+// LE CS Security Enable, 0x208C (7.8.133).
+pub @tier(embedded)
+@no_alloc
+fn opcode_le_cs_security_enable() -> Int
+    (0x08 << 10) | 0x08C
+
+// LE CS Set Default Settings, 0x208D (7.8.134).
+pub @tier(embedded)
+@no_alloc
+fn opcode_le_cs_set_default_settings() -> Int
+    (0x08 << 10) | 0x08D
+
+// LE CS Read Remote FAE Table, 0x208E (7.8.135).
+pub @tier(embedded)
+@no_alloc
+fn opcode_le_cs_read_remote_fae_table() -> Int
+    (0x08 << 10) | 0x08E
+
+// LE CS Write Cached Remote FAE Table, 0x208F (7.8.136).
+pub @tier(embedded)
+@no_alloc
+fn opcode_le_cs_write_cached_remote_fae_table() -> Int
+    (0x08 << 10) | 0x08F
+
+// LE CS Create Config, 0x2090 (7.8.137).
+pub @tier(embedded)
+@no_alloc
+fn opcode_le_cs_create_config() -> Int
+    (0x08 << 10) | 0x090
+
+// LE CS Remove Config, 0x2091 (7.8.138).
+pub @tier(embedded)
+@no_alloc
+fn opcode_le_cs_remove_config() -> Int
+    (0x08 << 10) | 0x091
+
+// LE CS Set Channel Classification, 0x2092 (7.8.139).
+pub @tier(embedded)
+@no_alloc
+fn opcode_le_cs_set_channel_classification() -> Int
+    (0x08 << 10) | 0x092
+
+// LE CS Set Procedure Parameters, 0x2093 (7.8.140).
+pub @tier(embedded)
+@no_alloc
+fn opcode_le_cs_set_procedure_parameters() -> Int
+    (0x08 << 10) | 0x093
+
+// LE CS Procedure Enable, 0x2094 (7.8.141).
+pub @tier(embedded)
+@no_alloc
+fn opcode_le_cs_procedure_enable() -> Int
+    (0x08 << 10) | 0x094
+
+// LE CS Test, 0x2095 (7.8.142).
+pub @tier(embedded)
+@no_alloc
+fn opcode_le_cs_test() -> Int
+    (0x08 << 10) | 0x095
+
+// LE CS Test End, 0x2096 (7.8.143).
+pub @tier(embedded)
+@no_alloc
+fn opcode_le_cs_test_end() -> Int
+    (0x08 << 10) | 0x096
+
+// LE CS Read Local Supported Capabilities [v2], 0x20A5 (7.8.130).
+pub @tier(embedded)
+@no_alloc
+fn opcode_le_cs_read_local_supported_capabilities_v2() -> Int
+    (0x08 << 10) | 0x0A5
+
+// LE CS Write Cached Remote Supported Capabilities [v2], 0x20A6 (7.8.132).
+pub @tier(embedded)
+@no_alloc
+fn opcode_le_cs_write_cached_remote_supported_capabilities_v2() -> Int
+    (0x08 << 10) | 0x0A6
+
+// LE CS Set Security Requirements, 0x20A7 (7.8.157).
+pub @tier(embedded)
+@no_alloc
+fn opcode_le_cs_set_security_requirements() -> Int
+    (0x08 << 10) | 0x0A7
+
+// LE CS Set Default Security Requirements, 0x20A8 (7.8.158).
+pub @tier(embedded)
+@no_alloc
+fn opcode_le_cs_set_default_security_requirements() -> Int
+    (0x08 << 10) | 0x0A8
+
+// ── The subevent codes and the mask ─────────────────────────────────
+
+// LE Meta subevent codes of the nine events ([Vol 4] Part E, Sections 7.7.65.39 to 7.7.65.46).
+pub const SUB_CS_READ_REMOTE_SUPPORTED_CAPABILITIES_COMPLETE = 0x2C
+pub const SUB_CS_READ_REMOTE_FAE_TABLE_COMPLETE = 0x2D
+pub const SUB_CS_SECURITY_ENABLE_COMPLETE = 0x2E
+pub const SUB_CS_CONFIG_COMPLETE = 0x2F
+pub const SUB_CS_PROCEDURE_ENABLE_COMPLETE = 0x30
+pub const SUB_CS_SUBEVENT_RESULT = 0x31
+pub const SUB_CS_SUBEVENT_RESULT_CONTINUE = 0x32
+pub const SUB_CS_TEST_END_COMPLETE = 0x33
+pub const SUB_CS_READ_REMOTE_SUPPORTED_CAPABILITIES_COMPLETE_V2 = 0x38
+
+// The bits 43 to 50 of LE Set Event Mask, the eight events of the [v1] set ([Vol 4] Part E, Section 7.8.1).
+pub const LE_EVENT_MASK_CS = 0x0007F80000000000
+
+// Bit 55 of LE Set Event Mask: the Read Remote Supported Capabilities Complete event [v2].
+pub const LE_EVENT_MASK_CS_V2 = 0x0080000000000000
+
+// The LE feature bit a Host sets with LE Set Host Feature before its first connection: Channel Sounding (Host Support), 47 ([Vol 6] Part B,
+// Section 4.6).
+pub const FEATURE_CS_HOST_SUPPORT = 47
+
+// ── Values ──────────────────────────────────────────────────────────
+
+pub const CS_ROLE_INITIATOR = 0
+pub const CS_ROLE_REFLECTOR = 1
+
+// Role_Enable bits of LE CS Set Default Settings.
+pub const CS_ROLE_ENABLE_INITIATOR = 0x01
+pub const CS_ROLE_ENABLE_REFLECTOR = 0x02
+
+// Create_Context of LE CS Create Config: the configuration is written in the local Controller only, or in both Controllers.
+pub const CS_CREATE_LOCAL = 0x00
+pub const CS_CREATE_BOTH = 0x01
+
+// Sub_Mode_Type 0xFF: no submode.
+pub const CS_SUB_MODE_UNUSED = 0xFF
+
+// CS_SYNC_PHY of Create Config and LE CS Test.
+pub const CS_SYNC_PHY_1M = 0x01
+pub const CS_SYNC_PHY_2M = 0x02
+pub const CS_SYNC_PHY_2M_2BT = 0x03
+
+// RTT_Type: access address only, and the sounding and random sequences.
+pub const CS_RTT_AA_ONLY = 0x00
+pub const CS_RTT_SOUNDING_32 = 0x01
+pub const CS_RTT_SOUNDING_96 = 0x02
+pub const CS_RTT_RANDOM_32 = 0x03
+pub const CS_RTT_RANDOM_64 = 0x04
+pub const CS_RTT_RANDOM_96 = 0x05
+pub const CS_RTT_RANDOM_128 = 0x06
+
+// Channel_Selection_Type.
+pub const CS_CHSEL_3B = 0x00
+pub const CS_CHSEL_3C = 0x01
+
+// Max_TX_Power of LE CS Set Default Settings and CS_SYNC_Antenna_Selection values.
+pub const CS_ANTENNA_NO_RECOMMENDATION = 0xFF
+pub const CS_ANTENNA_REPETITIVE = 0xFD
+pub const CS_ANTENNA_ORDERED = 0xFE
+
+// Tx_Power_Delta 0x80: the Host has no recommendation.  SNR control 0xFF: not applied.
+pub const CS_TX_POWER_DELTA_NONE = 0x80
+pub const CS_SNR_NONE = 0xFF
+
+// The done statuses of a result event, bits 0 to 3 of Procedure_Done_Status and of Subevent_Done_Status.
+pub const CS_DONE_COMPLETE = 0x0
+pub const CS_DONE_PARTIAL = 0x1
+pub const CS_DONE_ABORTED = 0xF
+
+// The value of an unavailable field: a time difference (16 bits), a frequency offset (16 bits), a phase correction term of a packet
+// (32 bits), and a reference power level or an RSSI (8 bits).
+pub const CS_TIME_DIFF_NA = 0x8000
+pub const CS_FREQ_NA = 0xC000
+pub const CS_PCT_NA = 0xFFFFFFFF
+pub const CS_POWER_NA = 0x7F
+
+// The sizes of the records.
+pub const CS_CMD_OCTETS = 256
+pub const CS_STEPS_PER_EVENT = 80
+pub const CS_STEPS_PER_PROCEDURE = 256
+pub const CS_SUBEVENTS_PER_PROCEDURE = 32
+pub const CS_TONE_SLOTS = 5
+pub const CS_CHANNEL_MAP_OCTETS = 10
+pub const CS_FAE_ENTRIES = 72
+
+// ── A command ───────────────────────────────────────────────────────
+
+// A command to send: the `opcode` and the first `n` octets of `b` as its parameters.
+pub @value
+struct HciCsCmd
+    opcode: Int
+    n: Int
+    b: Vec[u8; 256]
+
+// An empty command with `opcode`.
+pub @tier(embedded)
+fn cs_cmd_new(opcode: Int) -> HciCsCmd
+    var c = HciCsCmd { opcode: opcode, n: 0, b: Vec.new() }
+    for _ in 0..CS_CMD_OCTETS
+        let _a = c.b.push(0)
+    c
+
+@tier(embedded)
+@no_alloc
+fn put8(var c: HciCsCmd, v: Int)
+    if c.n < CS_CMD_OCTETS
+        c.b[c.n] = (v & 0xFF) as u8
+        c.n = c.n + 1
+
+@tier(embedded)
+@no_alloc
+fn put16(var c: HciCsCmd, v: Int)
+    put8(var c, v)
+    put8(var c, v >>> 8)
+
+@tier(embedded)
+@no_alloc
+fn put24(var c: HciCsCmd, v: Int)
+    put8(var c, v)
+    put8(var c, v >>> 8)
+    put8(var c, v >>> 16)
+
+@tier(embedded)
+@no_alloc
+fn put32(var c: HciCsCmd, v: Int)
+    put16(var c, v)
+    put16(var c, v >>> 16)
+
+// The parameter octets of `c`.
+pub @tier(app)
+fn cs_cmd_params(c: HciCsCmd) -> [u8]
+    var out: [u8] = []
+    for i in 0..c.n
+        list.push(out, c.b[i])
+    out
+
+// `c` as the message a transport takes.
+pub @tier(app)
+fn cs_cmd_msg(c: HciCsCmd) -> hci_frame.HciCmdMsg
+    hci_frame.HciCmdMsg { opcode: c.opcode, params: cs_cmd_params(c) }
+
+// The 12-bit handle.
+@tier(embedded)
+@no_alloc
+fn handle_of(h: Int) -> Int
+    h & 0x0FFF
+
+// ── The capability record ───────────────────────────────────────────
+
+// The capability record of a Controller (7.8.130): the 28 octets of the [v1] record and, when `v2`, the 6 more of the [v2] one.  `sync_phys`
+// is the CS_SYNC_PHYs_Supported mask (bit 1 LE 2M, bit 2 LE 2M 2BT) and `subfeatures` the Subfeatures_Supported mask (bit 1 No_FAE, 2
+// Channel Selection Algorithm #3c, 3 phase-based ranging from a sounding sequence, 4 IPT in the reflector, 5 RTT accuracy per PHY).  A [v1]
+// record read into this one leaves the [v2] fields as the specification says a [v2] reader takes them: zero, and the 2M counts equal to the
+// 1M ones.
+pub @value
+struct HciCsCaps
+    v2: Bool
+    num_config: Int
+    max_procedures: Int
+    num_antennae: Int
+    max_antenna_paths: Int
+    roles: Int
+    modes: Int
+    rtt_capability: Int
+    rtt_aa_only_n: Int
+    rtt_sounding_n: Int
+    rtt_random_n: Int
+    nadm_sounding: Int
+    nadm_random: Int
+    sync_phys: Int
+    subfeatures: Int
+    t_ip1: Int
+    t_ip2: Int
+    t_fcs: Int
+    t_pm: Int
+    t_sw: Int
+    tx_snr: Int
+    t_ip2_ipt: Int
+    t_sw_ipt: Int
+    rtt_2m_aa_only_n: Int
+    rtt_2m_sounding_n: Int
+    rtt_2m_random_n: Int
+
+// A record with every field zero.
+pub @tier(embedded)
+@no_alloc
+fn cs_caps_none() -> HciCsCaps
+    HciCsCaps { v2: false, num_config: 0, max_procedures: 0, num_antennae: 0, max_antenna_paths: 0, roles: 0, modes: 0, rtt_capability: 0,
+             rtt_aa_only_n: 0, rtt_sounding_n: 0, rtt_random_n: 0, nadm_sounding: 0, nadm_random: 0, sync_phys: 0, subfeatures: 0,
+             t_ip1: 0, t_ip2: 0, t_fcs: 0, t_pm: 0, t_sw: 0, tx_snr: 0, t_ip2_ipt: 0, t_sw_ipt: 0, rtt_2m_aa_only_n: 0,
+             rtt_2m_sounding_n: 0, rtt_2m_random_n: 0 }
+
+// The Subfeatures_Supported bits.
+pub const CS_SUB_NO_FAE = 0x0002
+pub const CS_SUB_CHANNEL_SELECTION_3C = 0x0004
+pub const CS_SUB_SOUNDING_PCT = 0x0008
+pub const CS_SUB_IPT = 0x0010
+pub const CS_SUB_RTT_PER_PHY = 0x0020
+
+// Whether the record names the initiator role, and the reflector role.
+pub @tier(embedded)
+@no_alloc
+fn cs_caps_initiator(c: HciCsCaps) -> Bool
+    (c.roles & 1) != 0
+
+pub @tier(embedded)
+@no_alloc
+fn cs_caps_reflector(c: HciCsCaps) -> Bool
+    (c.roles & 2) != 0
+
+// The octets the record takes in a [v1] and in a [v2] command or event.
+pub const CS_CAPS_V1_OCTETS = 28
+pub const CS_CAPS_V2_OCTETS = 34
+
+@tier(embedded)
+@no_alloc
+fn u8_at(e: [u8], at: Int) -> Int
+    e[at] as Int
+
+@tier(embedded)
+@no_alloc
+fn u16_at(e: [u8], at: Int) -> Int
+    (e[at] as Int) | ((e[at + 1] as Int) << 8)
+
+@tier(embedded)
+@no_alloc
+fn u24_at(e: [u8], at: Int) -> Int
+    (e[at] as Int) | ((e[at + 1] as Int) << 8) | ((e[at + 2] as Int) << 16)
+
+@tier(embedded)
+@no_alloc
+fn u32_at(e: [u8], at: Int) -> Int
+    u24_at(e, at) | ((e[at + 3] as Int) << 24)
+
+@tier(embedded)
+@no_alloc
+fn s8_of(v: Int) -> Int
+    if v >= 0x80
+        v - 0x100
+    else
+        v
+
+// The record in `e` at `at`: the 28 octets of the [v1] record, then the 6 of the [v2] one when `v2`.  The caller checked the length.
+@tier(embedded)
+fn caps_read(e: [u8], at: Int, v2: Bool, var c: HciCsCaps)
+    c.v2 = v2
+    c.num_config = u8_at(e, at)
+    c.max_procedures = u16_at(e, at + 1)
+    c.num_antennae = u8_at(e, at + 3)
+    c.max_antenna_paths = u8_at(e, at + 4)
+    c.roles = u8_at(e, at + 5)
+    c.modes = u8_at(e, at + 6)
+    c.rtt_capability = u8_at(e, at + 7)
+    c.rtt_aa_only_n = u8_at(e, at + 8)
+    c.rtt_sounding_n = u8_at(e, at + 9)
+    c.rtt_random_n = u8_at(e, at + 10)
+    c.nadm_sounding = u16_at(e, at + 11)
+    c.nadm_random = u16_at(e, at + 13)
+    c.sync_phys = u8_at(e, at + 15)
+    c.subfeatures = u16_at(e, at + 16)
+    c.t_ip1 = u16_at(e, at + 18)
+    c.t_ip2 = u16_at(e, at + 20)
+    c.t_fcs = u16_at(e, at + 22)
+    c.t_pm = u16_at(e, at + 24)
+    c.t_sw = u8_at(e, at + 26)
+    c.tx_snr = u8_at(e, at + 27)
+    if v2
+        c.t_ip2_ipt = u16_at(e, at + 28)
+        c.t_sw_ipt = u8_at(e, at + 30)
+        c.rtt_2m_aa_only_n = u8_at(e, at + 31)
+        c.rtt_2m_sounding_n = u8_at(e, at + 32)
+        c.rtt_2m_random_n = u8_at(e, at + 33)
+    else
+        c.t_ip2_ipt = 0
+        c.t_sw_ipt = 0
+        c.rtt_2m_aa_only_n = c.rtt_aa_only_n
+        c.rtt_2m_sounding_n = c.rtt_sounding_n
+        c.rtt_2m_random_n = c.rtt_random_n
+
+// Write the record to `c`: 28 octets, 34 when `c.v2` is the form asked for (`v2`).
+@tier(embedded)
+fn caps_write(var cmd: HciCsCmd, caps: HciCsCaps, v2: Bool)
+    put8(var cmd, caps.num_config)
+    put16(var cmd, caps.max_procedures)
+    put8(var cmd, caps.num_antennae)
+    put8(var cmd, caps.max_antenna_paths)
+    put8(var cmd, caps.roles)
+    put8(var cmd, caps.modes)
+    put8(var cmd, caps.rtt_capability)
+    put8(var cmd, caps.rtt_aa_only_n)
+    put8(var cmd, caps.rtt_sounding_n)
+    put8(var cmd, caps.rtt_random_n)
+    put16(var cmd, caps.nadm_sounding)
+    put16(var cmd, caps.nadm_random)
+    put8(var cmd, caps.sync_phys)
+    put16(var cmd, caps.subfeatures)
+    put16(var cmd, caps.t_ip1)
+    put16(var cmd, caps.t_ip2)
+    put16(var cmd, caps.t_fcs)
+    put16(var cmd, caps.t_pm)
+    put8(var cmd, caps.t_sw)
+    put8(var cmd, caps.tx_snr)
+    if v2
+        put16(var cmd, caps.t_ip2_ipt)
+        put8(var cmd, caps.t_sw_ipt)
+        put8(var cmd, caps.rtt_2m_aa_only_n)
+        put8(var cmd, caps.rtt_2m_sounding_n)
+        put8(var cmd, caps.rtt_2m_random_n)
+
+// The record of a Command Complete event `evt` for LE CS Read Local Supported Capabilities, [v1] or [v2] as `v2` says: the status and the
+// record.  False when `evt` is no Command Complete event of that opcode or holds fewer octets than the record.  The Status is `status`;
+// the record is filled whatever it is when the octets are there.
+pub @tier(embedded)
+fn cs_read_local_capabilities(evt: [u8], v2: Bool, var caps: HciCsCaps, var status: Int) -> Bool
+    let want = if v2 then opcode_le_cs_read_local_supported_capabilities_v2() else opcode_le_cs_read_local_supported_capabilities()
+    let n = list.len(evt)
+    let rec = if v2 then CS_CAPS_V2_OCTETS else CS_CAPS_V1_OCTETS
+    if n < 6 or u8_at(evt, 0) != hci_frame.EVT_COMMAND_COMPLETE or u16_at(evt, 3) != want
+        return false
+    status = u8_at(evt, 5)
+    if status != 0
+        return true
+    if n < 6 + rec
+        return false
+    caps_read(evt, 6, v2, var caps)
+    true
+
+// ── The commands ────────────────────────────────────────────────────
+
+// LE CS Read Local Supported Capabilities, [v1] or [v2]: no parameters.
+pub @tier(embedded)
+fn cs_read_local_supported_capabilities(v2: Bool) -> HciCsCmd
+    if v2
+        cs_cmd_new(opcode_le_cs_read_local_supported_capabilities_v2())
+    else
+        cs_cmd_new(opcode_le_cs_read_local_supported_capabilities())
+
+// LE CS Read Remote Supported Capabilities: Connection_Handle.
+pub @tier(embedded)
+fn cs_read_remote_supported_capabilities(handle: Int) -> HciCsCmd
+    var c = cs_cmd_new(opcode_le_cs_read_remote_supported_capabilities())
+    put16(var c, handle_of(handle))
+    c
+
+// LE CS Write Cached Remote Supported Capabilities: Connection_Handle and the record, 30 octets or, with `v2`, 36.
+pub @tier(embedded)
+fn cs_write_cached_remote_supported_capabilities(handle: Int, caps: HciCsCaps, v2: Bool) -> HciCsCmd
+    var c = cs_cmd_new(if v2 then opcode_le_cs_write_cached_remote_supported_capabilities_v2() else opcode_le_cs_write_cached_remote_supported_capabilities())
+    put16(var c, handle_of(handle))
+    caps_write(var c, caps, v2)
+    c
+
+// LE CS Security Enable: Connection_Handle.
+pub @tier(embedded)
+fn cs_security_enable(handle: Int) -> HciCsCmd
+    var c = cs_cmd_new(opcode_le_cs_security_enable())
+    put16(var c, handle_of(handle))
+    c
+
+// LE CS Set Default Settings: Connection_Handle, Role_Enable (bit 0 initiator, bit 1 reflector), CS_SYNC_Antenna_Selection and Max_TX_Power in dBm
+// (-127 to 20).
+pub @tier(embedded)
+fn cs_set_default_settings(handle: Int, role_enable: Int, sync_antenna: Int, max_tx_power: Int) -> HciCsCmd
+    var c = cs_cmd_new(opcode_le_cs_set_default_settings())
+    put16(var c, handle_of(handle))
+    put8(var c, role_enable)
+    put8(var c, sync_antenna)
+    put8(var c, max_tx_power)
+    c
+
+// LE CS Read Remote FAE Table: Connection_Handle.
+pub @tier(embedded)
+fn cs_read_remote_fae_table(handle: Int) -> HciCsCmd
+    var c = cs_cmd_new(opcode_le_cs_read_remote_fae_table())
+    put16(var c, handle_of(handle))
+    c
+
+// LE CS Write Cached Remote FAE Table: Connection_Handle and the 72 octets of the table, one signed octet (units of 31.25 ppb... of 1/32 ppm) for each
+// channel in the order of `cs_fae_channel`.  `table` holds the 72 values; fewer are written as given.
+pub @tier(embedded)
+fn cs_write_cached_remote_fae_table(handle: Int, table: Vec[Int; 72]) -> HciCsCmd
+    var c = cs_cmd_new(opcode_le_cs_write_cached_remote_fae_table())
+    put16(var c, handle_of(handle))
+    for i in 0..CS_FAE_ENTRIES
+        put8(var c, table[i])
+    c
+
+// The CS channel that entry `i` (0 to 71) of an FAE table belongs to: the entries 0 to 20 are the channels 2 to 22 and the entries 21 to 71 the
+// channels 26 to 76 ([Vol 6] Part B, Section 2.4.2.52).
+pub @tier(embedded)
+@no_alloc
+fn cs_fae_channel(i: Int) -> Int
+    if i < 21
+        i + 2
+    else
+        i + 5
+
+// The entry of an FAE table that belongs to the CS channel `ch`: the inverse of `cs_fae_channel`; -1 for a channel the table does not hold.
+pub @tier(embedded)
+@no_alloc
+fn cs_fae_index(ch: Int) -> Int
+    if ch >= 2 and ch <= 22
+        ch - 2
+    else if ch >= 26 and ch <= 76
+        ch - 5
+    else
+        -1
+
+// Whether `ch` is a CS channel a step may use: 2 to 22 and 26 to 76.
+pub @tier(embedded)
+@no_alloc
+fn cs_channel_ok(ch: Int) -> Bool
+    (ch >= 2 and ch <= 22) or (ch >= 26 and ch <= 76)
+
+// The 10 octets of a channel map with every usable channel enabled (72 of the 79).
+pub @tier(embedded)
+fn cs_channel_map_all() -> Vec[u8; 10]
+    var m: Vec[u8; 10] = Vec.new()
+    for _ in 0..CS_CHANNEL_MAP_OCTETS
+        let _a = m.push(0)
+    for ch in 0..79
+        if cs_channel_ok(ch)
+            m[ch / 8] = ((m[ch / 8] as Int) | (1 << (ch % 8))) as u8
+    m
+
+// The number of channels a map enables.
+pub @tier(embedded)
+fn cs_channel_map_count(m: Vec[u8; 10]) -> Int
+    var n = 0
+    for ch in 0..80
+        if (((m[ch / 8] as Int) >> (ch % 8)) & 1) == 1
+            n = n + 1
+    n
+
+// The parameters of LE CS Create Config (7.8.137) and the fields of the Config Complete event that echo them.  `create_context` is
+// `CS_CREATE_LOCAL` or `CS_CREATE_BOTH`; `sub_mode` is `CS_SUB_MODE_UNUSED` for none; `role` is 0 for the initiator and 1 for the reflector;
+// `enhancements` bit 0 is IPT in the reflector.
+pub @value
+struct HciCsConfig
+    handle: Int
+    config_id: Int
+    create_context: Int
+    main_mode: Int
+    sub_mode: Int
+    min_main_steps: Int
+    max_main_steps: Int
+    main_repetition: Int
+    mode0_steps: Int
+    role: Int
+    rtt_type: Int
+    sync_phy: Int
+    channel_map: Vec[u8; 10]
+    channel_map_repetition: Int
+    channel_selection: Int
+    ch3c_shape: Int
+    ch3c_jump: Int
+    enhancements: Int
+
+// A configuration of both Controllers: mode 2 only, one main mode step, one mode 0 step, access address only, LE 1M, every usable channel,
+// three repetitions of the map, Channel Selection Algorithm #3b.  The caller sets the handle, the Config_ID and the role.
+pub @tier(embedded)
+fn cs_config_new(handle: Int, config_id: Int, role: Int) -> HciCsConfig
+    HciCsConfig { handle: handle, config_id: config_id, create_context: CS_CREATE_BOTH, main_mode: 2, sub_mode: CS_SUB_MODE_UNUSED,
+               min_main_steps: 1, max_main_steps: 1, main_repetition: 1, mode0_steps: 1, role: role, rtt_type: CS_RTT_AA_ONLY,
+               sync_phy: CS_SYNC_PHY_1M, channel_map: cs_channel_map_all(), channel_map_repetition: 3, channel_selection: CS_CHSEL_3B,
+               ch3c_shape: 0, ch3c_jump: 0, enhancements: 0 }
+
+// LE CS Create Config: 28 octets.
+pub @tier(embedded)
+fn cs_create_config(cfg: HciCsConfig) -> HciCsCmd
+    var c = cs_cmd_new(opcode_le_cs_create_config())
+    put16(var c, handle_of(cfg.handle))
+    put8(var c, cfg.config_id)
+    put8(var c, cfg.create_context)
+    put8(var c, cfg.main_mode)
+    put8(var c, cfg.sub_mode)
+    put8(var c, cfg.min_main_steps)
+    put8(var c, cfg.max_main_steps)
+    put8(var c, cfg.main_repetition)
+    put8(var c, cfg.mode0_steps)
+    put8(var c, cfg.role)
+    put8(var c, cfg.rtt_type)
+    put8(var c, cfg.sync_phy)
+    for i in 0..CS_CHANNEL_MAP_OCTETS
+        put8(var c, cfg.channel_map[i] as Int)
+    put8(var c, cfg.channel_map_repetition)
+    put8(var c, cfg.channel_selection)
+    put8(var c, cfg.ch3c_shape)
+    put8(var c, cfg.ch3c_jump)
+    put8(var c, cfg.enhancements)
+    c
+
+// LE CS Remove Config: Connection_Handle and Config_ID.
+pub @tier(embedded)
+fn cs_remove_config(handle: Int, config_id: Int) -> HciCsCmd
+    var c = cs_cmd_new(opcode_le_cs_remove_config())
+    put16(var c, handle_of(handle))
+    put8(var c, config_id)
+    c
+
+// LE CS Set Channel Classification: the 10 octets of the map of the channels the Host rates usable.
+pub @tier(embedded)
+fn cs_set_channel_classification(map: Vec[u8; 10]) -> HciCsCmd
+    var c = cs_cmd_new(opcode_le_cs_set_channel_classification())
+    for i in 0..CS_CHANNEL_MAP_OCTETS
+        put8(var c, map[i] as Int)
+    c
+
+// The parameters of LE CS Set Procedure Parameters (7.8.140).  `max_procedure_len` is in units of 0.625 ms; the intervals are in connection
+// events; `max_procedure_count` 0 means procedures continue until disabled; the subevent lengths are in microseconds (1250 to 3999999);
+// `antenna_config` is the Tone_Antenna_Config_Selection (0 to 7); `phy` is 1 LE 1M, 2 LE 2M, 3 and 4 LE Coded.
+pub @value
+struct HciCsProcedureParams
+    handle: Int
+    config_id: Int
+    max_procedure_len: Int
+    min_procedure_interval: Int
+    max_procedure_interval: Int
+    max_procedure_count: Int
+    min_subevent_len: Int
+    max_subevent_len: Int
+    antenna_config: Int
+    phy: Int
+    tx_power_delta: Int
+    preferred_peer_antenna: Int
+    snr_initiator: Int
+    snr_reflector: Int
+
+// Parameters for `count` procedures, each of `max_len` units of 0.625 ms, with subevents of `sub_len` microseconds, antenna configuration 0, LE 1M, no
+// recommendation for the power delta, the peer's first antenna and no SNR control.
+pub @tier(embedded)
+fn cs_procedure_params_new(handle: Int, config_id: Int, count: Int, max_len: Int, sub_len: Int) -> HciCsProcedureParams
+    HciCsProcedureParams { handle: handle, config_id: config_id, max_procedure_len: max_len, min_procedure_interval: 3, max_procedure_interval: 10,
+                        max_procedure_count: count, min_subevent_len: sub_len, max_subevent_len: sub_len, antenna_config: 0, phy: 1,
+                        tx_power_delta: CS_TX_POWER_DELTA_NONE, preferred_peer_antenna: 1, snr_initiator: CS_SNR_NONE, snr_reflector: CS_SNR_NONE }
+
+// LE CS Set Procedure Parameters: 23 octets.
+pub @tier(embedded)
+fn cs_set_procedure_parameters(p: HciCsProcedureParams) -> HciCsCmd
+    var c = cs_cmd_new(opcode_le_cs_set_procedure_parameters())
+    put16(var c, handle_of(p.handle))
+    put8(var c, p.config_id)
+    put16(var c, p.max_procedure_len)
+    put16(var c, p.min_procedure_interval)
+    put16(var c, p.max_procedure_interval)
+    put16(var c, p.max_procedure_count)
+    put24(var c, p.min_subevent_len)
+    put24(var c, p.max_subevent_len)
+    put8(var c, p.antenna_config)
+    put8(var c, p.phy)
+    put8(var c, p.tx_power_delta)
+    put8(var c, p.preferred_peer_antenna)
+    put8(var c, p.snr_initiator)
+    put8(var c, p.snr_reflector)
+    c
+
+// LE CS Procedure Enable: Connection_Handle, Config_ID, Enable.
+pub @tier(embedded)
+fn cs_procedure_enable(handle: Int, config_id: Int, enable: Bool) -> HciCsCmd
+    var c = cs_cmd_new(opcode_le_cs_procedure_enable())
+    put16(var c, handle_of(handle))
+    put8(var c, config_id)
+    put8(var c, if enable then 1 else 0)
+    c
+
+// The 30 octets of LE CS Test before its overrides (7.8.142).
+pub @value
+struct HciCsTestParams
+    main_mode: Int
+    sub_mode: Int
+    main_repetition: Int
+    mode0_steps: Int
+    role: Int
+    rtt_type: Int
+    sync_phy: Int
+    sync_antenna: Int
+    subevent_len: Int
+    subevent_interval: Int
+    max_subevents: Int
+    tx_power: Int
+    t_ip1: Int
+    t_ip2: Int
+    t_fcs: Int
+    t_pm: Int
+    t_sw: Int
+    antenna_config: Int
+    enhancements: Int
+    snr_initiator: Int
+    snr_reflector: Int
+    drbg_nonce: Int
+    channel_map_repetition: Int
+
+// LE CS Test: the 30 octets of `t`, Override_Config, Override_Parameters_Length and the override data, which `cs_test_override_map` builds for the
+// channel map.  The command is at most 255 octets of parameters; an override that would pass that is cut at the buffer.
+pub @tier(embedded)
+fn cs_test(t: HciCsTestParams, override_config: Int, override_data: [u8]) -> HciCsCmd
+    var c = cs_cmd_new(opcode_le_cs_test())
+    put8(var c, t.main_mode)
+    put8(var c, t.sub_mode)
+    put8(var c, t.main_repetition)
+    put8(var c, t.mode0_steps)
+    put8(var c, t.role)
+    put8(var c, t.rtt_type)
+    put8(var c, t.sync_phy)
+    put8(var c, t.sync_antenna)
+    put24(var c, t.subevent_len)
+    put16(var c, t.subevent_interval)
+    put8(var c, t.max_subevents)
+    put8(var c, t.tx_power)
+    put8(var c, t.t_ip1)
+    put8(var c, t.t_ip2)
+    put8(var c, t.t_fcs)
+    put8(var c, t.t_pm)
+    put8(var c, t.t_sw)
+    put8(var c, t.antenna_config)
+    put8(var c, t.enhancements)
+    put8(var c, t.snr_initiator)
+    put8(var c, t.snr_reflector)
+    put16(var c, t.drbg_nonce)
+    put8(var c, t.channel_map_repetition)
+    put16(var c, override_config)
+    put8(var c, list.len(override_data))
+    for i in 0..list.len(override_data)
+        put8(var c, override_data[i] as Int)
+    c
+
+// The override data of LE CS Test that carries the channel map (Override_Config bit 0 clear): Channel_Map, Channel_Selection_Type, Ch3c_Shape and
+// Ch3c_Jump, 13 octets.
+pub @tier(app)
+fn cs_test_override_map(map: Vec[u8; 10], chsel: Int, shape: Int, jump: Int) -> [u8]
+    var out: [u8] = []
+    for i in 0..CS_CHANNEL_MAP_OCTETS
+        list.push(out, map[i])
+    list.push(out, chsel as u8)
+    list.push(out, shape as u8)
+    list.push(out, jump as u8)
+    out
+
+// LE CS Test End: no parameters.
+pub @tier(embedded)
+fn cs_test_end() -> HciCsCmd
+    cs_cmd_new(opcode_le_cs_test_end())
+
+// The bits of CS_Security_Requirements (7.8.157, 7.8.158): 0 tone, 1 150 ns RTT accuracy, 2 10 ns RTT accuracy, 3 RTT with a sequence, 4 the Normalized
+// Attack Detector Metric.
+pub const CS_SEC_TONE = 0x01
+pub const CS_SEC_RTT_150NS = 0x02
+pub const CS_SEC_RTT_10NS = 0x04
+pub const CS_SEC_SEQUENCE = 0x08
+pub const CS_SEC_NADM = 0x10
+
+// LE CS Set Security Requirements: Connection_Handle and the 8 octets of the requirements.
+pub @tier(embedded)
+fn cs_set_security_requirements(handle: Int, requirements: Int) -> HciCsCmd
+    var c = cs_cmd_new(opcode_le_cs_set_security_requirements())
+    put16(var c, handle_of(handle))
+    put32(var c, requirements)
+    put32(var c, requirements >>> 32)
+    c
+
+// LE CS Set Default Security Requirements: the 8 octets of the requirements.
+pub @tier(embedded)
+fn cs_set_default_security_requirements(requirements: Int) -> HciCsCmd
+    var c = cs_cmd_new(opcode_le_cs_set_default_security_requirements())
+    put32(var c, requirements)
+    put32(var c, requirements >>> 32)
+    c
+
+// ── The events other than the results ───────────────────────────────
+
+// The Subevent_Code of an LE Meta event packet (code 0x3E, length, subevent code, parameters), -1 for any other.
+pub @tier(embedded)
+@no_alloc
+fn cs_subevent(evt: [u8]) -> Int
+    if list.len(evt) < 3 or u8_at(evt, 0) != hci_frame.EVT_LE_META_EVENT or u8_at(evt, 1) != list.len(evt) - 2
+        -1
+    else
+        u8_at(evt, 2)
+
+// Whether `sub` is the code of one of the nine events of Channel Sounding.
+pub @tier(embedded)
+@no_alloc
+fn cs_is_event(sub: Int) -> Bool
+    (sub >= 0x2C and sub <= 0x33) or sub == 0x38
+
+// The event LE CS Read Remote Supported Capabilities Complete ([v1] 0x2C, 34 octets with the header; [v2] 0x38, 40).
+pub @value
+struct HciCsRemoteCapabilities
+    status: Int
+    handle: Int
+    caps: HciCsCaps
+
+// Read the event `evt` into `out`.  False for any other event or a length that is not the event's.
+pub @tier(embedded)
+fn cs_read_remote_capabilities(evt: [u8], var out: HciCsRemoteCapabilities) -> Bool
+    let sub = cs_subevent(evt)
+    let v2 = sub == SUB_CS_READ_REMOTE_SUPPORTED_CAPABILITIES_COMPLETE_V2
+    if sub != SUB_CS_READ_REMOTE_SUPPORTED_CAPABILITIES_COMPLETE and not v2
+        return false
+    if list.len(evt) != (if v2 then 40 else 34)
+        return false
+    out.status = u8_at(evt, 3)
+    out.handle = u16_at(evt, 4) & 0x0FFF
+    caps_read(evt, 6, v2, var out.caps)
+    true
+
+// The event LE CS Read Remote FAE Table Complete (0x2D, 78 octets with the header): the table of 72 signed octets in 1/32 ppm, in the order of `cs_fae_channel`.
+pub @value
+struct HciCsRemoteFae
+    status: Int
+    handle: Int
+    table: Vec[Int; 72]
+
+// A table of 72 zeros.
+pub @tier(embedded)
+fn cs_fae_zero() -> Vec[Int; 72]
+    var t: Vec[Int; 72] = Vec.new()
+    for _ in 0..CS_FAE_ENTRIES
+        let _a = t.push(0)
+    t
+
+pub @tier(embedded)
+fn cs_remote_fae_new() -> HciCsRemoteFae
+    HciCsRemoteFae { status: 0, handle: 0, table: cs_fae_zero() }
+
+pub @tier(embedded)
+fn cs_read_remote_fae(evt: [u8], var out: HciCsRemoteFae) -> Bool
+    if cs_subevent(evt) != SUB_CS_READ_REMOTE_FAE_TABLE_COMPLETE or list.len(evt) != 78
+        return false
+    out.status = u8_at(evt, 3)
+    out.handle = u16_at(evt, 4) & 0x0FFF
+    for i in 0..CS_FAE_ENTRIES
+        out.table[i] = s8_of(u8_at(evt, 6 + i))
+    true
+
+// The event LE CS Security Enable Complete (0x2E, 6 octets with the header).
+pub @value
+struct HciCsSecurityComplete
+    status: Int
+    handle: Int
+
+pub @tier(embedded)
+fn cs_read_security_enable_complete(evt: [u8], var out: HciCsSecurityComplete) -> Bool
+    if cs_subevent(evt) != SUB_CS_SECURITY_ENABLE_COMPLETE or list.len(evt) != 6
+        return false
+    out.status = u8_at(evt, 3)
+    out.handle = u16_at(evt, 4) & 0x0FFF
+    true
+
+// The event LE CS Config Complete (0x2F, 36 octets with the header).  `action` is 1 for a configuration created and 0 for one removed (the fields after it
+// are then to be ignored).  The four times are in microseconds.
+pub @value
+struct HciCsConfigComplete
+    status: Int
+    action: Int
+    cfg: HciCsConfig
+    t_ip1_us: Int
+    t_ip2_us: Int
+    t_fcs_us: Int
+    t_pm_us: Int
+
+pub @tier(embedded)
+fn cs_config_complete_new() -> HciCsConfigComplete
+    HciCsConfigComplete { status: 0, action: 0, cfg: cs_config_new(0, 0, 0), t_ip1_us: 0, t_ip2_us: 0, t_fcs_us: 0, t_pm_us: 0 }
+
+pub @tier(embedded)
+fn cs_read_config_complete(evt: [u8], var out: HciCsConfigComplete) -> Bool
+    if cs_subevent(evt) != SUB_CS_CONFIG_COMPLETE or list.len(evt) != 36
+        return false
+    out.status = u8_at(evt, 3)
+    out.cfg.handle = u16_at(evt, 4) & 0x0FFF
+    out.cfg.config_id = u8_at(evt, 6)
+    out.action = u8_at(evt, 7)
+    out.cfg.create_context = CS_CREATE_BOTH
+    out.cfg.main_mode = u8_at(evt, 8)
+    out.cfg.sub_mode = u8_at(evt, 9)
+    out.cfg.min_main_steps = u8_at(evt, 10)
+    out.cfg.max_main_steps = u8_at(evt, 11)
+    out.cfg.main_repetition = u8_at(evt, 12)
+    out.cfg.mode0_steps = u8_at(evt, 13)
+    out.cfg.role = u8_at(evt, 14)
+    out.cfg.rtt_type = u8_at(evt, 15)
+    out.cfg.sync_phy = u8_at(evt, 16)
+    for i in 0..CS_CHANNEL_MAP_OCTETS
+        out.cfg.channel_map[i] = evt[17 + i]
+    out.cfg.channel_map_repetition = u8_at(evt, 27)
+    out.cfg.channel_selection = u8_at(evt, 28)
+    out.cfg.ch3c_shape = u8_at(evt, 29)
+    out.cfg.ch3c_jump = u8_at(evt, 30)
+    out.cfg.enhancements = u8_at(evt, 31)
+    out.t_ip1_us = u8_at(evt, 32)
+    out.t_ip2_us = u8_at(evt, 33)
+    out.t_fcs_us = u8_at(evt, 34)
+    out.t_pm_us = u8_at(evt, 35)
+    true
+
+// The event LE CS Procedure Enable Complete (0x30, 24 octets with the header).  `state` is 1 for procedures enabled and 0 for disabled (the fields
+// after it are then to be ignored).  `subevent_len` is in microseconds, the intervals in connection events, `max_procedure_len` in units of 0.625 ms,
+// `selected_tx_power` in dBm.
+pub @value
+struct HciCsProcedureEnableComplete
+    status: Int
+    handle: Int
+    config_id: Int
+    state: Int
+    antenna_config: Int
+    selected_tx_power: Int
+    subevent_len: Int
+    subevents_per_event: Int
+    subevent_interval: Int
+    event_interval: Int
+    procedure_interval: Int
+    procedure_count: Int
+    max_procedure_len: Int
+
+pub @tier(embedded)
+fn cs_procedure_enable_complete_new() -> HciCsProcedureEnableComplete
+    HciCsProcedureEnableComplete { status: 0, handle: 0, config_id: 0, state: 0, antenna_config: 0, selected_tx_power: 0, subevent_len: 0,
+                                subevents_per_event: 0, subevent_interval: 0, event_interval: 0, procedure_interval: 0, procedure_count: 0,
+                                max_procedure_len: 0 }
+
+pub @tier(embedded)
+fn cs_read_procedure_enable_complete(evt: [u8], var out: HciCsProcedureEnableComplete) -> Bool
+    if cs_subevent(evt) != SUB_CS_PROCEDURE_ENABLE_COMPLETE or list.len(evt) != 24
+        return false
+    out.status = u8_at(evt, 3)
+    out.handle = u16_at(evt, 4) & 0x0FFF
+    out.config_id = u8_at(evt, 6)
+    out.state = u8_at(evt, 7)
+    out.antenna_config = u8_at(evt, 8)
+    out.selected_tx_power = s8_of(u8_at(evt, 9))
+    out.subevent_len = u24_at(evt, 10)
+    out.subevents_per_event = u8_at(evt, 13)
+    out.subevent_interval = u16_at(evt, 14)
+    out.event_interval = u16_at(evt, 16)
+    out.procedure_interval = u16_at(evt, 18)
+    out.procedure_count = u16_at(evt, 20)
+    out.max_procedure_len = u16_at(evt, 22)
+    true
+
+// The event LE CS Test End Complete (0x33, 4 octets with the header): its status.  -1 for any other event.
+pub @tier(embedded)
+@no_alloc
+fn cs_read_test_end_complete(evt: [u8]) -> Int
+    if cs_subevent(evt) != SUB_CS_TEST_END_COMPLETE or list.len(evt) != 4
+        -1
+    else
+        u8_at(evt, 3)
+
+// ── A step ──────────────────────────────────────────────────────────
+
+// The data of one CS step, the fields its mode and role give it.  `mode` is 0 to 3 and `channel` the CS channel index (-1 where the source holds none,
+// the Ranging Data of a peer); `aborted` is a step with no data octets.  A field a step does not carry reads 0, its `*_na` flag is clear and `has_*` is
+// false.
+//
+//   mode 0   `quality`, `rssi`, `antenna`; the initiator's step also holds `ffo` (the raw 16 bits, `CS_FREQ_NA` when not measured) with `has_ffo`.
+//   mode 1   `quality`, `nadm`, `rssi`, `time_diff` (the raw 16 bits, 0.5 ns, `CS_TIME_DIFF_NA` when not available), `antenna`; a sounding sequence also
+//            `pct1` and `pct2` (the raw 32 bits, `CS_PCT_NA` when not available) with `has_pct`.
+//   mode 2   `permutation` and `slots` tone slots, each a raw 24-bit `pct[k]` (I in bits 0 to 11, Q in bits 12 to 23) and its `tq[k]` (bits 0 to 3 the
+//            quality, 0 high to 3 not available; bits 4 to 7 the tone extension slot, 0 none, 1 slot with no tone expected, 2 with a tone expected).
+//            The last slot is the tone extension slot.
+//   mode 3   the mode 1 fields and the mode 2 fields.
+pub @value
+struct HciCsStep
+    mode: Int
+    channel: Int
+    aborted: Bool
+    valid: Bool
+    data_len: Int
+    quality: Int
+    nadm: Int
+    rssi: Int
+    antenna: Int
+    has_ffo: Bool
+    ffo: Int
+    time_diff: Int
+    has_pct: Bool
+    pct1: Int
+    pct2: Int
+    permutation: Int
+    slots: Int
+    pct: Vec[Int; 5]
+    tq: Vec[Int; 5]
+
+pub @tier(embedded)
+fn cs_step_new() -> HciCsStep
+    var s = HciCsStep { mode: 0, channel: -1, aborted: false, valid: false, data_len: 0, quality: 0, nadm: 0xFF, rssi: CS_POWER_NA, antenna: 0,
+                     has_ffo: false, ffo: CS_FREQ_NA, time_diff: CS_TIME_DIFF_NA, has_pct: false, pct1: CS_PCT_NA, pct2: CS_PCT_NA, permutation: 0,
+                     slots: 0, pct: Vec.new(), tq: Vec.new() }
+    for _ in 0..CS_TONE_SLOTS
+        let _a = s.pct.push(0)
+        let _b = s.tq.push(3)
+    s
+
+// The I and the Q value (12 bits, two's complement) of a raw 24-bit phase correction term.
+pub @tier(embedded)
+@no_alloc
+fn cs_pct_i(pct: Int) -> Int
+    let v = pct & 0xFFF
+    if v >= 0x800
+        v - 0x1000
+    else
+        v
+
+pub @tier(embedded)
+@no_alloc
+fn cs_pct_q(pct: Int) -> Int
+    let v = (pct >>> 12) & 0xFFF
+    if v >= 0x800
+        v - 0x1000
+    else
+        v
+
+// The tone quality (bits 0 to 3 of a quality indicator): 0 high, 1 medium, 2 low, 3 not available; and the extension slot field (bits 4 to 7).
+pub @tier(embedded)
+@no_alloc
+fn cs_tq_quality(tq: Int) -> Int
+    tq & 0xF
+
+pub @tier(embedded)
+@no_alloc
+fn cs_tq_extension(tq: Int) -> Int
+    (tq >>> 4) & 0xF
+
+// A raw octet as a signed 8-bit value (an RSSI or a power level in dBm).
+pub @tier(embedded)
+@no_alloc
+fn cs_s8(raw: Int) -> Int
+    s8_of(raw & 0xFF)
+
+// A raw 16-bit field as a signed 15-bit value in 0.01 ppm (a frequency offset or compensation), and `CS_FREQ_NA` kept as it is.
+pub @tier(embedded)
+@no_alloc
+fn cs_s15(raw: Int) -> Int
+    let v = raw & 0x7FFF
+    if v >= 0x4000
+        v - 0x8000
+    else
+        v
+
+// A raw 16-bit time difference as a signed value in 0.5 ns.
+pub @tier(embedded)
+@no_alloc
+fn cs_s16(raw: Int) -> Int
+    let v = raw & 0xFFFF
+    if v >= 0x8000
+        v - 0x10000
+    else
+        v
+
+// The data octets of a step of `mode`: `initiator` is the role whose data it is, `pct` whether a mode 1 or mode 3 step holds the two phase correction
+// terms of a sounding sequence, `n_ap` the antenna paths.
+pub @tier(embedded)
+@no_alloc
+fn cs_step_data_len(mode: Int, initiator: Bool, pct: Bool, n_ap: Int) -> Int
+    let sounding = if pct then 8 else 0
+    if mode == 0
+        if initiator then 5 else 3
+    else if mode == 1
+        6 + sounding
+    else if mode == 2
+        1 + 4 * (n_ap + 1)
+    else
+        7 + sounding + 4 * (n_ap + 1)
+
+// Read the tone slots of a step from `slots` slots at `at`.
+@tier(embedded)
+fn tones_read(e: [u8], at: Int, slots: Int, var s: HciCsStep)
+    s.permutation = u8_at(e, at)
+    s.slots = slots
+    for k in 0..slots
+        s.pct[k] = u24_at(e, at + 1 + 4 * k)
+        s.tq[k] = u8_at(e, at + 4 + 4 * k)
+
+// Read the data of a step of `mode` held in `len` octets of `e` at `at` into `s`, for an event whose steps use `n_ap` antenna paths.  False when the
+// length is not one this mode takes.  A length of 0 is an aborted step: `s.aborted` is set, the step is valid and holds no field.  The role is told
+// from the length of a mode 0 step; `n_ap` tells a mode 3 step with the sounding terms from one without.
+pub @tier(embedded)
+fn cs_step_data_read(e: [u8], at: Int, len: Int, mode: Int, n_ap: Int, var s: HciCsStep) -> Bool
+    s.mode = mode
+    s.data_len = len
+    s.valid = false
+    s.aborted = false
+    s.has_ffo = false
+    s.has_pct = false
+    s.slots = 0
+    if len == 0
+        s.aborted = true
+        s.valid = true
+        return true
+    if mode == 0
+        if len != 3 and len != 5
+            return false
+        s.quality = u8_at(e, at)
+        s.rssi = s8_of(u8_at(e, at + 1))
+        s.antenna = u8_at(e, at + 2)
+        if len == 5
+            s.has_ffo = true
+            s.ffo = u16_at(e, at + 3)
+        s.valid = true
+        return true
+    if mode == 1
+        if len != 6 and len != 14
+            return false
+        s.quality = u8_at(e, at)
+        s.nadm = u8_at(e, at + 1)
+        s.rssi = s8_of(u8_at(e, at + 2))
+        s.time_diff = u16_at(e, at + 3)
+        s.antenna = u8_at(e, at + 5)
+        if len == 14
+            s.has_pct = true
+            s.pct1 = u32_at(e, at + 6)
+            s.pct2 = u32_at(e, at + 10)
+        s.valid = true
+        return true
+    if mode == 2
+        if len < 5 or (len - 1) % 4 != 0 or (len - 1) / 4 > CS_TONE_SLOTS
+            return false
+        tones_read(e, at, (len - 1) / 4, var s)
+        s.valid = true
+        return true
+    if mode == 3
+        let slots = n_ap + 1
+        let sounding = len == 15 + 4 * slots
+        if slots > CS_TONE_SLOTS or (len != 7 + 4 * slots and not sounding)
+            return false
+        s.quality = u8_at(e, at)
+        s.nadm = u8_at(e, at + 1)
+        s.rssi = s8_of(u8_at(e, at + 2))
+        s.time_diff = u16_at(e, at + 3)
+        s.antenna = u8_at(e, at + 5)
+        var off = at + 6
+        if sounding
+            s.has_pct = true
+            s.pct1 = u32_at(e, off)
+            s.pct2 = u32_at(e, off + 4)
+            off = off + 8
+        tones_read(e, off, slots, var s)
+        s.valid = true
+        return true
+    false
+
+// The data octets of the step `s` as an event carries them: the inverse of `cs_step_data_read`.  An aborted step has none.  The step's own fields decide the
+// form (`has_ffo`, `has_pct`, `slots`).
+pub @tier(app)
+fn cs_step_data_octets(s: HciCsStep) -> [u8]
+    var out: [u8] = []
+    if s.aborted
+        return out
+    if s.mode == 0
+        list.push(out, s.quality as u8)
+        list.push(out, s.rssi as u8)
+        list.push(out, s.antenna as u8)
+        if s.has_ffo
+            list.push(out, s.ffo as u8)
+            list.push(out, (s.ffo >>> 8) as u8)
+        return out
+    if s.mode == 1 or s.mode == 3
+        list.push(out, s.quality as u8)
+        list.push(out, s.nadm as u8)
+        list.push(out, s.rssi as u8)
+        list.push(out, s.time_diff as u8)
+        list.push(out, (s.time_diff >>> 8) as u8)
+        list.push(out, s.antenna as u8)
+        if s.has_pct
+            for k in 0..4
+                list.push(out, (s.pct1 >>> (8 * k)) as u8)
+            for k in 0..4
+                list.push(out, (s.pct2 >>> (8 * k)) as u8)
+    if s.mode == 2 or s.mode == 3
+        list.push(out, s.permutation as u8)
+        for k in 0..s.slots
+            list.push(out, s.pct[k] as u8)
+            list.push(out, (s.pct[k] >>> 8) as u8)
+            list.push(out, (s.pct[k] >>> 16) as u8)
+            list.push(out, s.tq[k] as u8)
+    out
+
+// ── A result event ──────────────────────────────────────────────────
+
+// One LE CS Subevent Result event (0x31, 16 octets of parameters before the steps) or Subevent Result Continue event (0x32, 9).  `cont` says which; a
+// Continue event holds no `start_acl_event`, `procedure_counter`, `frequency_compensation` or `reference_power` (they read 0).  `steps` holds `n_steps` of
+// the `CS_STEPS_PER_EVENT` places.
+pub @value
+struct HciCsResultEvent
+    cont: Bool
+    handle: Int
+    config_id: Int
+    start_acl_event: Int
+    procedure_counter: Int
+    frequency_compensation: Int
+    reference_power: Int
+    procedure_done: Int
+    subevent_done: Int
+    abort_procedure: Int
+    abort_subevent: Int
+    num_antenna_paths: Int
+    n_steps: Int
+    steps: Vec[HciCsStep; 80]
+
+pub @tier(embedded)
+fn cs_result_event_new() -> HciCsResultEvent
+    var r = HciCsResultEvent { cont: false, handle: 0, config_id: 0, start_acl_event: 0, procedure_counter: 0, frequency_compensation: CS_FREQ_NA,
+                            reference_power: CS_POWER_NA, procedure_done: 0, subevent_done: 0, abort_procedure: 0, abort_subevent: 0,
+                            num_antenna_paths: 0, n_steps: 0, steps: Vec.new() }
+    for _ in 0..CS_STEPS_PER_EVENT
+        let _a = r.steps.push(cs_step_new())
+    r
+
+// Read the Subevent Result or Subevent Result Continue event `evt` into `out`.  False for any other event, for a length that the steps do not fill
+// exactly, for a status pair Table 7.2 does not allow, and for a step whose length its mode does not take.
+pub @tier(embedded)
+fn cs_read_result(evt: [u8], var out: HciCsResultEvent) -> Bool
+    let sub = cs_subevent(evt)
+    if sub != SUB_CS_SUBEVENT_RESULT and sub != SUB_CS_SUBEVENT_RESULT_CONTINUE
+        return false
+    out.cont = sub == SUB_CS_SUBEVENT_RESULT_CONTINUE
+    let head = if out.cont then 11 else 18
+    let n = list.len(evt)
+    if n < head
+        return false
+    out.handle = u16_at(evt, 3) & 0x0FFF
+    out.config_id = u8_at(evt, 5)
+    var p = 6
+    if out.cont
+        out.start_acl_event = 0
+        out.procedure_counter = 0
+        out.frequency_compensation = CS_FREQ_NA
+        out.reference_power = CS_POWER_NA
+    else
+        out.start_acl_event = u16_at(evt, 6)
+        out.procedure_counter = u16_at(evt, 8)
+        out.frequency_compensation = u16_at(evt, 10)
+        out.reference_power = s8_of(u8_at(evt, 12))
+        p = 13
+    out.procedure_done = u8_at(evt, p) & 0xF
+    out.subevent_done = u8_at(evt, p + 1) & 0xF
+    out.abort_procedure = u8_at(evt, p + 2) & 0xF
+    out.abort_subevent = (u8_at(evt, p + 2) >>> 4) & 0xF
+    out.num_antenna_paths = u8_at(evt, p + 3)
+    out.n_steps = u8_at(evt, p + 4)
+    p = p + 5
+    if out.n_steps > CS_STEPS_PER_EVENT
+        return false
+    let pd = out.procedure_done
+    let sd = out.subevent_done
+    if (pd != 0 and pd != 1 and pd != 0xF) or (sd != 0 and sd != 1 and sd != 0xF)
+        return false
+    if (pd == 0 or pd == 0xF) and sd == 1
+        return false
+    for i in 0..out.n_steps
+        if p + 3 > n
+            return false
+        let mode = u8_at(evt, p) & 0x03
+        let channel = u8_at(evt, p + 1)
+        let len = u8_at(evt, p + 2)
+        if p + 3 + len > n or u8_at(evt, p) > 3
+            return false
+        out.steps[i].channel = channel
+        if not cs_step_data_read(evt, p + 3, len, mode, out.num_antenna_paths, var out.steps[i])
+            return false
+        p = p + 3 + len
+    p == n
+
+// ── The result of a procedure ───────────────────────────────────────
+
+// The header of one subevent in a `HciCsProcResult`: its steps are `first` to `first + count - 1` of the result's steps.  `done` is the Subevent_Done_Status
+// at the end of the subevent (0 complete, 0xF aborted, 1 while the Continue events are still to come).
+pub @value
+struct HciCsSubHead
+    start_acl_event: Int
+    frequency_compensation: Int
+    reference_power: Int
+    procedure_done: Int
+    done: Int
+    abort_procedure: Int
+    abort_subevent: Int
+    first: Int
+    count: Int
+
+// The Host-side result of one procedure (design page BLE-CHANNEL-SOUNDING.md, section 1.3): the steps of every subevent in the order the Controller
+// reported them, the header of each subevent, and what the procedure shares: the handle, the Config_ID, the Procedure_Counter and the number of antenna
+// paths.  `complete` is set when the last event of the procedure has been added (Procedure_Done_Status 0, or 0xF for a procedure the Controller aborted);
+// `overflow` when events held more subevents or steps than Core allows a procedure.
+pub @value
+struct HciCsProcResult
+    handle: Int
+    config_id: Int
+    procedure_counter: Int
+    num_antenna_paths: Int
+    complete: Bool
+    aborted: Bool
+    overflow: Bool
+    open: Bool
+    n_sub: Int
+    n_steps: Int
+    subs: Vec[HciCsSubHead; 32]
+    steps: Vec[HciCsStep; 256]
+
+pub @tier(embedded)
+fn cs_sub_head_new() -> HciCsSubHead
+    HciCsSubHead { start_acl_event: 0, frequency_compensation: CS_FREQ_NA, reference_power: CS_POWER_NA, procedure_done: 0, done: 0, abort_procedure: 0,
+                abort_subevent: 0, first: 0, count: 0 }
+
+pub @tier(embedded)
+fn cs_proc_result_new() -> HciCsProcResult
+    var r = HciCsProcResult { handle: 0, config_id: 0, procedure_counter: 0, num_antenna_paths: 0, complete: false, aborted: false, overflow: false,
+                           open: false, n_sub: 0, n_steps: 0, subs: Vec.new(), steps: Vec.new() }
+    for _ in 0..CS_SUBEVENTS_PER_PROCEDURE
+        let _a = r.subs.push(cs_sub_head_new())
+    for _ in 0..CS_STEPS_PER_PROCEDURE
+        let _b = r.steps.push(cs_step_new())
+    r
+
+// Empty the result for a new procedure.
+pub @tier(embedded)
+fn cs_proc_clear(var r: HciCsProcResult)
+    r.complete = false
+    r.aborted = false
+    r.overflow = false
+    r.open = false
+    r.n_sub = 0
+    r.n_steps = 0
+
+// Add one event to `r`.  A Subevent Result opens a subevent (the first of a procedure also takes the handle, Config_ID, counter and antenna paths); a
+// Continue event adds its steps to the open one.  The function answers 0 when the event was added, 1 when it belongs to no subevent (a Continue event
+// with none open), 2 when it is of another procedure than the one `r` holds (a Subevent Result with another Procedure_Counter after the first, while
+// the procedure is not complete), 3 when a limit of Core is passed (the event is cut at the limit and `r.overflow` is set).  The procedure is complete
+// when an event carries Procedure_Done_Status 0 or 0xF and no Continue event is to follow its subevent.
+pub @tier(embedded)
+fn cs_proc_add(var r: HciCsProcResult, ev: HciCsResultEvent) -> Int
+    if ev.cont
+        if not r.open or r.n_sub == 0
+            return 1
+    else
+        if r.n_sub == 0
+            r.handle = ev.handle
+            r.config_id = ev.config_id
+            r.procedure_counter = ev.procedure_counter
+            r.num_antenna_paths = ev.num_antenna_paths
+        else if ev.procedure_counter != r.procedure_counter or ev.config_id != r.config_id
+            return 2
+        if r.n_sub >= CS_SUBEVENTS_PER_PROCEDURE
+            r.overflow = true
+            return 3
+        r.subs[r.n_sub] = HciCsSubHead { start_acl_event: ev.start_acl_event, frequency_compensation: ev.frequency_compensation,
+                                      reference_power: ev.reference_power, procedure_done: 0, done: 0, abort_procedure: 0, abort_subevent: 0,
+                                      first: r.n_steps, count: 0 }
+        r.n_sub = r.n_sub + 1
+    let k = r.n_sub - 1
+    var code = 0
+    for i in 0..ev.n_steps
+        if r.n_steps >= CS_STEPS_PER_PROCEDURE
+            r.overflow = true
+            code = 3
+        else
+            r.steps[r.n_steps] = ev.steps[i]
+            r.n_steps = r.n_steps + 1
+            r.subs[k].count = r.subs[k].count + 1
+    r.subs[k].procedure_done = ev.procedure_done
+    r.subs[k].done = ev.subevent_done
+    r.subs[k].abort_procedure = ev.abort_procedure
+    r.subs[k].abort_subevent = ev.abort_subevent
+    r.open = ev.subevent_done == CS_DONE_PARTIAL
+    if ev.subevent_done != CS_DONE_PARTIAL and ev.procedure_done != CS_DONE_PARTIAL
+        r.complete = true
+        r.aborted = ev.procedure_done == CS_DONE_ABORTED
+    code
