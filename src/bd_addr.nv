@@ -68,7 +68,9 @@ fn classify_random(bytes: [u8]) -> BdAddrKind
 // The kind is set and the bytes are not checked: `classify_random` is the test of whether they carry the 0b11 pattern.
 pub @tier(embedded)
 fn static_random(bytes: [u8]) -> BdAddr
-    BdAddr { kind: StaticRandom, bytes: bytes }
+    // The record holds a list, so it is boxed: its construction is the one explicit allocation.
+    system
+        BdAddr { kind: StaticRandom, bytes: bytes }
 
 // The six octets of `bytes` as colon-separated upper-case hex, `bytes[0]` first.
 //
@@ -82,14 +84,17 @@ fn format_bd_addr(bytes: [u8]) -> Str
     let d = hex_byte(bytes[3] as Int)
     let e = hex_byte(bytes[4] as Int)
     let f = hex_byte(bytes[5] as Int)
-    a + ":" + b + ":" + c + ":" + d + ":" + e + ":" + f
+    // The text is built on the heap, so the function is for a log line or a display and not for a steady state.
+    system
+        a + ":" + b + ":" + c + ":" + d + ":" + e + ":" + f
 
 // The two upper-case hex digits of the low eight bits of `n`, as in `hex_byte(0xAB)` for `"AB"`.
 pub @tier(embedded)
 fn hex_byte(n: Int) -> Str
     let hi = (n >>> 4) & 0xF
     let lo = n & 0xF
-    "" + hex_nibble(hi) + hex_nibble(lo)
+    system
+        "" + hex_nibble(hi) + hex_nibble(lo)
 
 @tier(embedded)
 fn hex_nibble(n: Int) -> Str

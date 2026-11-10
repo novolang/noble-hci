@@ -1,0 +1,104 @@
+// Byte buffers of a known size, for the builders and readers of the HCI codec.
+//
+// Every builder of this package fills one `[u8]` that it sizes once, from the layout of the command or packet it
+// builds: `buf(n)` takes the whole block for `n` octets and the `put*` functions write into it, so a builder
+// asks the arena for one block and a list that grows is never reallocated.  `list.with_capacity` and
+// `list.try_push` are the embedded tier's bounded-buffer pair, so none of this module needs a `system` block.
+//
+// A `put*` function takes an `Int` and writes its low octets, the width the name gives, least significant octet
+// first (the order of every HCI field); a value wider than the field is cut to it, as `as u8` cuts it.  A buffer
+// that is full ignores a write: the sizes in the callers are the sizes of the fields they write, so no write meets
+// a full buffer.  The functions are `pub` because the codec modules call them; they are not part of the HCI
+// vocabulary of the package.
+
+// A new, empty buffer with room for `capacity` octets.
+pub @tier(embedded)
+fn buf(capacity: Int) -> [u8]
+    list.with_capacity(capacity)
+
+// An empty buffer that holds nothing, for a result with no octets.
+pub @tier(embedded)
+fn empty() -> [u8]
+    list.with_capacity(0)
+
+// Append the low octet of `v` to `out`.
+pub @tier(embedded)
+fn put8(var out: [u8], v: Int)
+    let _ = list.try_push(out, (v & 0xFF) as u8)
+
+// Append the low 16 bits of `v` to `out`, least significant octet first.
+pub @tier(embedded)
+fn put16(var out: [u8], v: Int)
+    put8(var out, v)
+    put8(var out, v >>> 8)
+
+// Append the low 12 bits of `v`, the width of a Connection_Handle, as the two octets the commands give it: the
+// low octet, then the high octet with its upper four bits clear.
+pub @tier(embedded)
+fn put12(var out: [u8], v: Int)
+    put8(var out, v)
+    put8(var out, (v >>> 8) & 0x0F)
+
+// Append the low 24 bits of `v` to `out`, least significant octet first.
+pub @tier(embedded)
+fn put24(var out: [u8], v: Int)
+    put16(var out, v)
+    put8(var out, v >>> 16)
+
+// Append the low 32 bits of `v` to `out`, least significant octet first.
+pub @tier(embedded)
+fn put32(var out: [u8], v: Int)
+    put16(var out, v)
+    put16(var out, v >>> 16)
+
+// Append the 64 bits of `v` to `out`, least significant octet first.
+pub @tier(embedded)
+fn put64(var out: [u8], v: Int)
+    put32(var out, v)
+    put32(var out, v >>> 32)
+
+// Append `n` zero octets to `out`; nothing when `n` is not positive.
+pub @tier(embedded)
+fn put_zeros(var out: [u8], n: Int)
+    for _ in 0..n
+        put8(var out, 0)
+
+// Append every octet of `src` to `out`.
+pub @tier(embedded)
+fn put_bytes(var out: [u8], src: [u8])
+    put_range(var out, src, 0, list.len(src))
+
+// The number of octets of `src` from index `lo` up to, not including, index `hi`, cut to `src` as the slice `src[lo:hi]` is: an
+// index past the end gives fewer octets and an empty range gives none.
+pub @tier(embedded)
+@no_alloc
+fn range_len(src: [u8], lo: Int, hi: Int) -> Int
+    let start = if lo < 0
+        0
+    else
+        lo
+    let end = if hi < list.len(src)
+        hi
+    else
+        list.len(src)
+    if end > start
+        end - start
+    else
+        0
+
+// Append the octets of `src` from index `lo` up to, not including, index `hi`, cut to `src` as `range_len` cuts.
+pub @tier(embedded)
+fn put_range(var out: [u8], src: [u8], lo: Int, hi: Int)
+    let start = if lo < 0
+        0
+    else
+        lo
+    for i in start..start + range_len(src, lo, hi)
+        let _ = list.try_push(out, src[i])
+
+// A new list of the octets of `src` from index `lo` up to, not including, index `hi`, cut to `src` as `range_len` cuts.
+pub @tier(embedded)
+fn slice(src: [u8], lo: Int, hi: Int) -> [u8]
+    var out = buf(range_len(src, lo, hi))
+    put_range(var out, src, lo, hi)
+    out

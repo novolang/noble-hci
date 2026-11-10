@@ -19,11 +19,8 @@ novo        = ">= 0.21.1"
 tier   = "embedded"
 target = "nrf52832-dk"
 
-# The modules were written as the embedded tier of orbit/ble and keep their `@tier(embedded)` marks.  165 of
-# their functions build a list or call `list.append`, which the embedded tier refuses (E4000); orbit/ble carries
-# the same findings under the same knob, and the package reports them as warnings until the codecs are written
-# over fixed-capacity buffers.
-sibling_check = "warn"
+# Every module is written for the embedded tier and is checked against it in full: a list is built with `list.with_capacity` and
+# `list.try_push`, and the few records and strings that must be heap values are built in a `system` block.
 
 [docs.pages]
 "README.md"    = "The HCI seam of the noble stack"

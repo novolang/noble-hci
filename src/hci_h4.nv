@@ -12,6 +12,8 @@
 // The module frames a packet and tells a deframer how many bytes the next packet occupies.  It does no I/O and
 // returns an index rather than a slice, so a deframer built on it does not allocate.
 
+use hci_buf
+
 // H4 packet-type byte of an HCI Command packet, 0x01 ([Vol 4] Part A, Section 2).
 pub const PKT_COMMAND = 0x01
 
@@ -36,10 +38,10 @@ pub @satisfies("REQ-BLE-H4-001")
 @satisfies("REQ-BLE-H4-010")
 @tier(embedded)
 fn frame_h4(pkt_type: Int, hci_packet: [u8]) -> [u8]
-    var prefix: [u8] = list.with_capacity(1 + list.len(hci_packet))
-    list.append(prefix, [pkt_type as u8])
-    list.append(prefix, hci_packet)
-    prefix
+    var out = hci_buf.buf(1 + list.len(hci_packet))
+    hci_buf.put8(var out, pkt_type)
+    hci_buf.put_bytes(var out, hci_packet)
+    out
 
 // The answer of `h4_packet_length` when the bytes held do not yet hold the length field, -1: wait for more.
 pub const H4_BYTES_NEED_MORE = -1

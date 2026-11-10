@@ -1,0 +1,93 @@
+// tests/hci_buf_tests.nv — the unit tests of src/hci_buf.nv.
+//
+//   novo test tests/hci_buf_tests.nv
+
+use std.test
+use hci_buf.{ buf, empty, put12, put16, put24, put32, put64, put8, put_bytes, put_range, put_zeros, range_len, slice }
+
+fn same(got: [u8], want: [u8])
+    test.assert_eq(list.len(got), list.len(want))
+    for i in 0..list.len(want)
+        test.assert_eq(got[i] as Int, want[i] as Int)
+
+@test
+fn test_buf_and_empty_start_with_no_octets()
+    test.assert_eq(list.len(buf(8)), 0)
+    test.assert_eq(list.len(empty()), 0)
+
+@test
+fn test_put8_writes_the_low_octet()
+    var out = buf(3)
+    put8(var out, 0x12)
+    put8(var out, 0x1FF)
+    put8(var out, -1)
+    same(out, [0x12, 0xFF, 0xFF])
+
+@test
+fn test_put16_is_least_significant_octet_first_and_cuts_the_value()
+    var out = buf(6)
+    put16(var out, 0x1234)
+    put16(var out, 0x11234)
+    put16(var out, 0xFFFF)
+    same(out, [0x34, 0x12, 0x34, 0x12, 0xFF, 0xFF])
+
+@test
+fn test_put12_clears_the_upper_four_bits_of_the_high_octet()
+    var out = buf(4)
+    put12(var out, 0x0ABC)
+    put12(var out, 0xFABC)
+    same(out, [0xBC, 0x0A, 0xBC, 0x0A])
+
+@test
+fn test_put24_put32_and_put64_are_least_significant_octet_first()
+    var out = buf(15)
+    put24(var out, 0x010203)
+    put32(var out, 0xDEADBEEF)
+    put64(var out, 0x0102030405060708)
+    same(out, [0x03, 0x02, 0x01, 0xEF, 0xBE, 0xAD, 0xDE, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01])
+
+@test
+fn test_put_zeros_writes_nothing_for_a_count_that_is_not_positive()
+    var out = buf(4)
+    put_zeros(var out, 3)
+    put_zeros(var out, 0)
+    put_zeros(var out, -2)
+    same(out, [0, 0, 0])
+
+@test
+fn test_put_bytes_appends_every_octet()
+    var out = buf(5)
+    put8(var out, 9)
+    put_bytes(var out, [1, 2, 3])
+    put_bytes(var out, empty())
+    same(out, [9, 1, 2, 3])
+
+@test
+fn test_a_full_buffer_ignores_a_write()
+    var out = buf(2)
+    put32(var out, 0x04030201)
+    same(out, [0x01, 0x02])
+
+@test
+fn test_range_len_is_cut_to_the_source()
+    let src: [u8] = [1, 2, 3, 4]
+    test.assert_eq(range_len(src, 0, 4), 4)
+    test.assert_eq(range_len(src, 1, 3), 2)
+    test.assert_eq(range_len(src, 0, 6), 4)
+    test.assert_eq(range_len(src, -2, 2), 2)
+    test.assert_eq(range_len(src, 3, 1), 0)
+    test.assert_eq(range_len(src, 9, 12), 0)
+
+@test
+fn test_put_range_and_slice_cut_as_the_slice_does()
+    let src: [u8] = [10, 20, 30, 40]
+    var out = buf(8)
+    put_range(var out, src, 1, 3)
+    put_range(var out, src, 2, 9)
+    put_range(var out, src, 3, 1)
+    put_range(var out, src, -5, 1)
+    same(out, [20, 30, 30, 40, 10])
+    same(slice(src, 0, 2), [10, 20])
+    same(slice(src, 3, 9), [40])
+    same(slice(src, 2, 2), empty())
+    same(slice(src, 7, 9), empty())

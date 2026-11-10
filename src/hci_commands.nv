@@ -13,6 +13,7 @@
 // Multi-octet fields are little-endian.
 
 use std.bits
+use hci_buf
 
 // ═════════════════════════════════════════════════════════════════════
 // Link-control commands  (OGF 0x01)
@@ -39,7 +40,10 @@ pub const DISCONNECT_REASON_LOW_RESOURCES = 0x14
 // Reason.
 pub @tier(embedded)
 fn build_disconnect(connection_handle: Int, reason: Int) -> [u8]
-    [(connection_handle & 0xFF) as u8, ((connection_handle >>> 8) & 0x0F) as u8, reason as u8]
+    var out = hci_buf.buf(3)
+    hci_buf.put12(var out, connection_handle)
+    hci_buf.put8(var out, reason)
+    out
 
 // ═════════════════════════════════════════════════════════════════════
 // Controller + Baseband commands  (OGF 0x03)
@@ -109,7 +113,9 @@ pub const FLOW_CONTROL_ACL = 0x01
 pub @satisfies("REQ-BLE-HCI-059")
 @tier(embedded)
 fn build_set_controller_to_host_flow_control(enable: Int) -> [u8]
-    [enable as u8]
+    var out = hci_buf.buf(1)
+    hci_buf.put8(var out, enable)
+    out
 
 // The 7 parameter octets of Host Buffer Size: Host_ACL_Data_Packet_Length
 // (2), Host_Synchronous_Data_Packet_Length (1), Host_Total_Num_ACL_Data_Packets
@@ -118,8 +124,12 @@ fn build_set_controller_to_host_flow_control(enable: Int) -> [u8]
 pub @satisfies("REQ-BLE-HCI-059")
 @tier(embedded)
 fn build_host_buffer_size(acl_length: Int, acl_total: Int) -> [u8]
-    [(acl_length & 0xFF) as u8, ((acl_length >>> 8) & 0xFF) as u8, 0x00,
-     (acl_total & 0xFF) as u8, ((acl_total >>> 8) & 0xFF) as u8, 0x00, 0x00]
+    var out = hci_buf.buf(7)
+    hci_buf.put16(var out, acl_length)
+    hci_buf.put8(var out, 0)
+    hci_buf.put16(var out, acl_total)
+    hci_buf.put16(var out, 0)
+    out
 
 // The parameters of Host Number Of Completed Packets for one handle:
 // Num_Handles (1), Connection_Handle (2) and Host_Num_Of_Completed_Packets
@@ -127,8 +137,11 @@ fn build_host_buffer_size(acl_length: Int, acl_total: Int) -> [u8]
 pub @satisfies("REQ-BLE-HCI-059")
 @tier(embedded)
 fn build_host_number_of_completed_packets(connection_handle: Int, count: Int) -> [u8]
-    [0x01, (connection_handle & 0xFF) as u8, ((connection_handle >>> 8) & 0x0F) as u8,
-     (count & 0xFF) as u8, ((count >>> 8) & 0xFF) as u8]
+    var out = hci_buf.buf(5)
+    hci_buf.put8(var out, 1)
+    hci_buf.put12(var out, connection_handle)
+    hci_buf.put16(var out, count)
+    out
 
 // The parameters of Host Number Of Completed Packets for several handles:
 // Num_Handles (1), then Connection_Handle[i] (2 each) and
@@ -138,13 +151,12 @@ fn build_host_number_of_completed_packets(connection_handle: Int, count: Int) ->
 pub @satisfies("REQ-BLE-HCI-059")
 @tier(embedded)
 fn build_host_number_of_completed_packets_list(handles: [Int], counts: [Int]) -> [u8]
-    var out: [u8] = [list.len(handles) as u8]
+    var out = hci_buf.buf(1 + 2 * list.len(handles) + 2 * list.len(counts))
+    hci_buf.put8(var out, list.len(handles))
     for h in handles
-        list.push(out, (h & 0xFF) as u8)
-        list.push(out, ((h >>> 8) & 0x0F) as u8)
+        hci_buf.put12(var out, h)
     for n in counts
-        list.push(out, (n & 0xFF) as u8)
-        list.push(out, ((n >>> 8) & 0xFF) as u8)
+        hci_buf.put16(var out, n)
     out
 
 // Whether `commands`, the 64 octets of Supported_Commands, lists Host Buffer
@@ -724,10 +736,9 @@ fn opcode_le_long_term_key_request_negative_reply() -> Int
 pub @satisfies("REQ-BLE-HCI-018")
 @tier(embedded)
 fn build_le_set_advertising_enable(enable: Bool) -> [u8]
-    if enable
-        [0x01]
-    else
-        [0x00]
+    var out = hci_buf.buf(1)
+    hci_buf.put8(var out, if enable then 0x01 else 0x00)
+    out
 
 // Build LE_Set_Random_Address parameters: 6-byte address
 // (Vol 4 Part E §7.8.4).  Byte ordering is the HCI convention
@@ -735,7 +746,10 @@ fn build_le_set_advertising_enable(enable: Bool) -> [u8]
 pub @satisfies("REQ-BLE-HCI-013")
 @tier(embedded)
 fn build_le_set_random_address(bd_addr: [u8]) -> [u8]
-    [bd_addr[0], bd_addr[1], bd_addr[2], bd_addr[3], bd_addr[4], bd_addr[5]]
+    var out = hci_buf.buf(6)
+    for i in 0..6
+        hci_buf.put8(var out, bd_addr[i] as Int)
+    out
 
 // ── Advertising-parameter helpers ───────────────────────────────────
 //
@@ -840,10 +854,10 @@ fn build_le_adv_data_block(data: [u8]) -> ?[u8]
     if n > ADV_DATA_MAX_LEN
         None
     else
-        var block: [u8] = [n as u8]
-        list.append(block, data)
-        for _ in n..ADV_DATA_MAX_LEN
-            list.push(block, 0x00)
+        var block = hci_buf.buf(1 + ADV_DATA_MAX_LEN)
+        hci_buf.put8(var block, n)
+        hci_buf.put_bytes(var block, data)
+        hci_buf.put_zeros(var block, ADV_DATA_MAX_LEN - n)
         Some(block)
 
 // ── Extended advertising and periodic advertising ───────────────────
@@ -999,10 +1013,14 @@ pub @tier(embedded)
 fn build_le_set_extended_scan_parameters(own_address_type: Int, filter_policy: Int,
                                          scanning_phys: Int, scan_type: Int, interval: Int,
                                          window: Int) -> [u8]
-    [own_address_type as u8, filter_policy as u8, scanning_phys as u8,
-     scan_type as u8,
-     (interval & 0xFF) as u8, ((interval >>> 8) & 0xFF) as u8,
-     (window & 0xFF) as u8, ((window >>> 8) & 0xFF) as u8]
+    var out = hci_buf.buf(8)
+    hci_buf.put8(var out, own_address_type)
+    hci_buf.put8(var out, filter_policy)
+    hci_buf.put8(var out, scanning_phys)
+    hci_buf.put8(var out, scan_type)
+    hci_buf.put16(var out, interval)
+    hci_buf.put16(var out, window)
+    out
 
 // The 6 parameter octets of the LE Set Extended Scan Enable command
 // ([Vol 4] Part E, Section 7.8.65): Enable, Filter_Duplicates, and the
@@ -1010,14 +1028,11 @@ fn build_le_set_extended_scan_parameters(own_address_type: Int, filter_policy: I
 // that lasts until it is disabled.
 pub @tier(embedded)
 fn build_le_set_extended_scan_enable(enable: Bool, filter_duplicates: Bool) -> [u8]
-    [(if enable then 0x01 else 0x00) as u8, (if filter_duplicates then 0x01 else 0x00) as u8,
-     0x00, 0x00, 0x00, 0x00]
-
-// A 24-bit value least significant octet first, the width the primary
-// advertising intervals take.
-@tier(embedded)
-fn le24(v: Int) -> [u8]
-    [(v & 0xFF) as u8, ((v >>> 8) & 0xFF) as u8, ((v >>> 16) & 0xFF) as u8]
+    var out = hci_buf.buf(6)
+    hci_buf.put8(var out, if enable then 0x01 else 0x00)
+    hci_buf.put8(var out, if filter_duplicates then 0x01 else 0x00)
+    hci_buf.put_zeros(var out, 4)
+    out
 
 // The 25 parameter octets of the LE Set Extended Advertising Parameters
 // command ([Vol 4] Part E, Section 7.8.53): the handle, the event
@@ -1036,15 +1051,22 @@ fn build_le_set_extended_advertising_parameters(advertising_handle: Int, event_p
                                                 filter_policy: Int, tx_power: Int, primary_phy: Int,
                                                 secondary_max_skip: Int, secondary_phy: Int,
                                                 sid: Int, scan_request_notification: Int) -> [u8]
-    var out: [u8] = [advertising_handle as u8,
-                     (event_properties & 0xFF) as u8, ((event_properties >>> 8) & 0xFF) as u8]
-    list.append(out, le24(interval_min))
-    list.append(out, le24(interval_max))
-    list.append(out, [channel_map as u8, own_address_type as u8, peer_address_type as u8])
-    list.append(out, peer_address[0:6])
-    list.append(out, [filter_policy as u8, tx_power as u8, primary_phy as u8,
-                      secondary_max_skip as u8, secondary_phy as u8, sid as u8,
-                      scan_request_notification as u8])
+    var out = hci_buf.buf(25)
+    hci_buf.put8(var out, advertising_handle)
+    hci_buf.put16(var out, event_properties)
+    hci_buf.put24(var out, interval_min)
+    hci_buf.put24(var out, interval_max)
+    hci_buf.put8(var out, channel_map)
+    hci_buf.put8(var out, own_address_type)
+    hci_buf.put8(var out, peer_address_type)
+    hci_buf.put_range(var out, peer_address, 0, 6)
+    hci_buf.put8(var out, filter_policy)
+    hci_buf.put8(var out, tx_power)
+    hci_buf.put8(var out, primary_phy)
+    hci_buf.put8(var out, secondary_max_skip)
+    hci_buf.put8(var out, secondary_phy)
+    hci_buf.put8(var out, sid)
+    hci_buf.put8(var out, scan_request_notification)
     out
 
 // The parameter octets of the LE Set Extended Advertising Data command
@@ -1060,8 +1082,12 @@ fn build_le_set_extended_data(advertising_handle: Int, operation: Int, fragment_
     if list.len(data) > 255
         None
     else
-        var out: [u8] = [advertising_handle as u8, operation as u8, fragment_preference as u8, list.len(data) as u8]
-        list.append(out, data)
+        var out = hci_buf.buf(4 + list.len(data))
+        hci_buf.put8(var out, advertising_handle)
+        hci_buf.put8(var out, operation)
+        hci_buf.put8(var out, fragment_preference)
+        hci_buf.put8(var out, list.len(data))
+        hci_buf.put_bytes(var out, data)
         Some(out)
 
 // The 7 parameter octets of the LE Set Advertising Set Random Address
@@ -1074,8 +1100,9 @@ fn build_le_set_extended_data(advertising_handle: Int, operation: Int, fragment_
 pub @satisfies("REQ-BLE-HCI-051")
 @tier(embedded)
 fn build_le_set_advertising_set_random_address(advertising_handle: Int, address: [u8]) -> [u8]
-    var out: [u8] = [advertising_handle as u8]
-    list.append(out, address[0:6])
+    var out = hci_buf.buf(7)
+    hci_buf.put8(var out, advertising_handle)
+    hci_buf.put_range(var out, address, 0, 6)
     out
 
 // The 6 parameter octets of the LE Set Extended Advertising Enable
@@ -1087,16 +1114,21 @@ pub @satisfies("REQ-BLE-HCI-051")
 @tier(embedded)
 fn build_le_set_extended_advertising_enable(enable: Bool, advertising_handle: Int, duration: Int,
                                             max_events: Int) -> [u8]
-    [(if enable then 0x01 else 0x00) as u8, 0x01,
-     advertising_handle as u8,
-     (duration & 0xFF) as u8, ((duration >>> 8) & 0xFF) as u8,
-     max_events as u8]
+    var out = hci_buf.buf(6)
+    hci_buf.put8(var out, if enable then 0x01 else 0x00)
+    hci_buf.put8(var out, 0x01)
+    hci_buf.put8(var out, advertising_handle)
+    hci_buf.put16(var out, duration)
+    hci_buf.put8(var out, max_events)
+    out
 
 // The one parameter octet of the LE Remove Advertising Set command
 // ([Vol 4] Part E, Section 7.8.59).
 pub @tier(embedded)
 fn build_le_remove_advertising_set(advertising_handle: Int) -> [u8]
-    [advertising_handle as u8]
+    var out = hci_buf.buf(1)
+    hci_buf.put8(var out, advertising_handle)
+    out
 
 // The 6 parameter octets of the LE Set Periodic Advertising Parameters
 // command ([Vol 4] Part E, Section 7.8.61): Advertising_Handle, the two
@@ -1110,10 +1142,12 @@ pub @satisfies("REQ-BLE-HCI-052")
 @tier(embedded)
 fn build_le_set_periodic_advertising_parameters(advertising_handle: Int, interval_min: Int,
                                                 interval_max: Int, properties: Int) -> [u8]
-    [advertising_handle as u8,
-     (interval_min & 0xFF) as u8, ((interval_min >>> 8) & 0xFF) as u8,
-     (interval_max & 0xFF) as u8, ((interval_max >>> 8) & 0xFF) as u8,
-     (properties & 0xFF) as u8, ((properties >>> 8) & 0xFF) as u8]
+    var out = hci_buf.buf(7)
+    hci_buf.put8(var out, advertising_handle)
+    hci_buf.put16(var out, interval_min)
+    hci_buf.put16(var out, interval_max)
+    hci_buf.put16(var out, properties)
+    out
 
 // The parameter octets of the LE Set Periodic Advertising Data command
 // ([Vol 4] Part E, Section 7.8.62): Advertising_Handle, Operation, then
@@ -1126,8 +1160,11 @@ fn build_le_set_periodic_advertising_data(advertising_handle: Int, operation: In
     if list.len(data) > 255
         None
     else
-        var out: [u8] = [advertising_handle as u8, operation as u8, list.len(data) as u8]
-        list.append(out, data)
+        var out = hci_buf.buf(3 + list.len(data))
+        hci_buf.put8(var out, advertising_handle)
+        hci_buf.put8(var out, operation)
+        hci_buf.put8(var out, list.len(data))
+        hci_buf.put_bytes(var out, data)
         Some(out)
 
 // The 12 parameter octets of the LE Set Periodic Advertising Parameters
@@ -1150,13 +1187,17 @@ fn build_le_set_periodic_advertising_parameters_v2(advertising_handle: Int, inte
                                                    response_slot_delay: Int,
                                                    response_slot_spacing: Int,
                                                    num_response_slots: Int) -> [u8]
-    [advertising_handle as u8,
-     (interval_min & 0xFF) as u8, ((interval_min >>> 8) & 0xFF) as u8,
-     (interval_max & 0xFF) as u8, ((interval_max >>> 8) & 0xFF) as u8,
-     (properties & 0xFF) as u8, ((properties >>> 8) & 0xFF) as u8,
-     num_subevents as u8, subevent_interval as u8,
-     response_slot_delay as u8, response_slot_spacing as u8,
-     num_response_slots as u8]
+    var out = hci_buf.buf(12)
+    hci_buf.put8(var out, advertising_handle)
+    hci_buf.put16(var out, interval_min)
+    hci_buf.put16(var out, interval_max)
+    hci_buf.put16(var out, properties)
+    hci_buf.put8(var out, num_subevents)
+    hci_buf.put8(var out, subevent_interval)
+    hci_buf.put8(var out, response_slot_delay)
+    hci_buf.put8(var out, response_slot_spacing)
+    hci_buf.put8(var out, num_response_slots)
+    out
 
 // The parameter octets of the LE Set Periodic Advertising Subevent Data
 // command ([Vol 4] Part E, Section 7.8.125): Advertising_Handle,
@@ -1177,15 +1218,22 @@ fn build_le_set_periodic_advertising_subevent_data(advertising_handle: Int,
     if n < 1 or n > PAWR_SUBEVENTS_MAX
         None
     else
-        var out: [u8] = [advertising_handle as u8, n as u8]
+        var size = 2
+        for s in subevents
+            size = size + 4 + list.len(s.data)
+        var out = hci_buf.buf(size)
+        hci_buf.put8(var out, advertising_handle)
+        hci_buf.put8(var out, n)
         var too_long = false
         for s in subevents
             if s.subevent > PAWR_SUBEVENT_MAX or list.len(s.data) > PAWR_SUBEVENT_DATA_MAX
                 too_long = true
             else
-                list.append(out, [s.subevent as u8, s.response_slot_start as u8,
-                                  s.response_slot_count as u8, list.len(s.data) as u8])
-                list.append(out, s.data)
+                hci_buf.put8(var out, s.subevent)
+                hci_buf.put8(var out, s.response_slot_start)
+                hci_buf.put8(var out, s.response_slot_count)
+                hci_buf.put8(var out, list.len(s.data))
+                hci_buf.put_bytes(var out, s.data)
         if too_long
             None
         else
@@ -1246,7 +1294,10 @@ pub const PAWR_RESPONSE_SLOT_SPACING_MIN = 0x02
 pub @satisfies("REQ-BLE-HCI-052")
 @tier(embedded)
 fn build_le_set_periodic_advertising_enable(enable: Bool, advertising_handle: Int) -> [u8]
-    [(if enable then 0x01 else 0x00) as u8, advertising_handle as u8]
+    var out = hci_buf.buf(2)
+    hci_buf.put8(var out, if enable then 0x01 else 0x00)
+    hci_buf.put8(var out, advertising_handle)
+    out
 
 // The 8 parameter octets of the LE Set Periodic Advertising Sync
 // Transfer Parameters command ([Vol 4] Part E, Section 7.8.91):
@@ -1257,11 +1308,12 @@ pub @satisfies("REQ-BLE-HCI-054")
 fn build_le_set_periodic_advertising_sync_transfer_parameters(connection_handle: Int, mode: Int,
                                                               skip: Int, sync_timeout: Int,
                                                               cte_type: Int) -> [u8]
-    var out = build_connection_handle(connection_handle)
-    list.append(out, [mode as u8,
-                      (skip & 0xFF) as u8, ((skip >>> 8) & 0xFF) as u8,
-                      (sync_timeout & 0xFF) as u8, ((sync_timeout >>> 8) & 0xFF) as u8,
-                      cte_type as u8])
+    var out = hci_buf.buf(8)
+    hci_buf.put12(var out, connection_handle)
+    hci_buf.put8(var out, mode)
+    hci_buf.put16(var out, skip)
+    hci_buf.put16(var out, sync_timeout)
+    hci_buf.put8(var out, cte_type)
     out
 
 // The 5 parameter octets of the LE Periodic Advertising Set Info
@@ -1272,9 +1324,10 @@ pub @satisfies("REQ-BLE-HCI-053")
 @tier(embedded)
 fn build_le_periodic_advertising_set_info_transfer(connection_handle: Int, service_data: Int,
                                                    advertising_handle: Int) -> [u8]
-    var out = build_connection_handle(connection_handle)
-    list.append(out, [(service_data & 0xFF) as u8, ((service_data >>> 8) & 0xFF) as u8,
-                      advertising_handle as u8])
+    var out = hci_buf.buf(5)
+    hci_buf.put12(var out, connection_handle)
+    hci_buf.put16(var out, service_data)
+    hci_buf.put8(var out, advertising_handle)
     out
 
 // The 6 parameter octets of the LE Periodic Advertising Sync Transfer
@@ -1284,9 +1337,10 @@ pub @satisfies("REQ-BLE-HCI-053")
 @tier(embedded)
 fn build_le_periodic_advertising_sync_transfer(connection_handle: Int, service_data: Int,
                                                sync_handle: Int) -> [u8]
-    var out = build_connection_handle(connection_handle)
-    list.append(out, [(service_data & 0xFF) as u8, ((service_data >>> 8) & 0xFF) as u8,
-                      (sync_handle & 0xFF) as u8, ((sync_handle >>> 8) & 0xFF) as u8])
+    var out = hci_buf.buf(6)
+    hci_buf.put12(var out, connection_handle)
+    hci_buf.put16(var out, service_data)
+    hci_buf.put16(var out, sync_handle)
     out
 
 // The default Event_Mask of a Controller, 0x00001FFFFFFFFFFF: bits 0 to 44 set and the LE Meta event, bit 61, clear.
@@ -1309,8 +1363,9 @@ pub const EVENT_MASK_ENCRYPTION_KEY_REFRESH_COMPLETE = 0x0000800000000000
 // significant first.
 pub @tier(embedded)
 fn build_set_event_mask(mask: Int) -> [u8]
-    [(mask & 0xFF) as u8, ((mask >>> 8) & 0xFF) as u8, ((mask >>> 16) & 0xFF) as u8, ((mask >>> 24) & 0xFF) as u8,
-     ((mask >>> 32) & 0xFF) as u8, ((mask >>> 40) & 0xFF) as u8, ((mask >>> 48) & 0xFF) as u8, ((mask >>> 56) & 0xFF) as u8]
+    var out = hci_buf.buf(8)
+    hci_buf.put64(var out, mask)
+    out
 
 // ── Scanning ────────────────────────────────────────────────────────
 //
@@ -1342,26 +1397,32 @@ pub const INITIATOR_FILTER_ACCEPT_LIST = 0x01
 // ([Vol 4] Part E, Section 7.8.16): Address_Type and Address.
 pub @tier(embedded)
 fn build_le_add_device_to_filter_accept_list(address_type: Int, address: [u8]) -> [u8]
-    var out: [u8] = [address_type as u8]
-    list.append(out, address[0:6])
+    var out = hci_buf.buf(7)
+    hci_buf.put8(var out, address_type)
+    hci_buf.put_range(var out, address, 0, 6)
     out
 
 // The 7 parameter octets of the LE Set Scan Parameters command.
 pub @tier(embedded)
 fn build_le_set_scan_parameters(scan_type: Int, interval: Int, window: Int, own_address_type: Int,
                                 filter_policy: Int) -> [u8]
-    [scan_type as u8,
-     (interval & 0xFF) as u8, ((interval >>> 8) & 0xFF) as u8,
-     (window & 0xFF) as u8, ((window >>> 8) & 0xFF) as u8,
-     own_address_type as u8,
-     filter_policy as u8]
+    var out = hci_buf.buf(7)
+    hci_buf.put8(var out, scan_type)
+    hci_buf.put16(var out, interval)
+    hci_buf.put16(var out, window)
+    hci_buf.put8(var out, own_address_type)
+    hci_buf.put8(var out, filter_policy)
+    out
 
 // The LE_Scan_Enable and Filter_Duplicates octets of the LE Set Scan
 // Enable command ([Vol 4] Part E, Section 7.8.11).  The Controller
 // ignores Filter_Duplicates when scanning is disabled.
 pub @tier(embedded)
 fn build_le_set_scan_enable(enable: Bool, filter_duplicates: Bool) -> [u8]
-    [(if enable then 0x01 else 0x00) as u8, (if filter_duplicates then 0x01 else 0x00) as u8]
+    var out = hci_buf.buf(2)
+    hci_buf.put8(var out, if enable then 0x01 else 0x00)
+    hci_buf.put8(var out, if filter_duplicates then 0x01 else 0x00)
+    out
 
 // The parameters of the LE Add Device To Resolving List command ([Vol 4] Part E, Section 7.8.38):
 // Peer_Identity_Address_Type, Peer_Identity_Address, Peer_IRK and Local_IRK, 39 octets.  A Local_IRK of
@@ -1369,18 +1430,19 @@ fn build_le_set_scan_enable(enable: Bool, filter_duplicates: Bool) -> [u8]
 pub @tier(embedded)
 fn build_le_add_device_to_resolving_list(address_type: Int, address: [u8], peer_irk: [u8],
                                          local_irk: [u8]) -> [u8]
-    var out: [u8] = [address_type as u8]
-    list.append(out, address[0:6])
-    list.append(out, peer_irk[0:16])
-    list.append(out, local_irk[0:16])
+    var out = hci_buf.buf(39)
+    hci_buf.put8(var out, address_type)
+    hci_buf.put_range(var out, address, 0, 6)
+    hci_buf.put_range(var out, peer_irk, 0, 16)
+    hci_buf.put_range(var out, local_irk, 0, 16)
     out
 
 // The Address_Resolution_Enable octet of the LE Set Address Resolution Enable command.
 pub @tier(embedded)
 fn build_le_set_address_resolution_enable(enable: Bool) -> [u8]
-    let on: u8 = 0x01
-    let off: u8 = 0x00
-    [(if enable then on else off)]
+    var out = hci_buf.buf(1)
+    hci_buf.put8(var out, if enable then 0x01 else 0x00)
+    out
 
 // The default LE_Event_Mask, 0x000000000000001F: bits 0 to 4.
 //
@@ -1716,38 +1778,24 @@ pub @tier(embedded)
 fn iso_sdu_interval_ok(sdu_interval: Int) -> Bool
     sdu_interval >= ISO_SDU_INTERVAL_MIN and sdu_interval <= ISO_SDU_INTERVAL_MAX
 
-// A 16-bit and a 32-bit value least significant octet first.
-@tier(embedded)
-fn le16_octets(v: Int) -> [u8]
-    [(v & 0xFF) as u8, ((v >>> 8) & 0xFF) as u8]
-
-@tier(embedded)
-fn le32_octets(v: Int) -> [u8]
-    [(v & 0xFF) as u8,
-        ((v >>> 8) & 0xFF) as u8,
-        ((v >>> 16) & 0xFF) as u8,
-        ((v >>> 24) & 0xFF) as u8]
-
-// A Connection_Handle, 12 bits meaningful, in the two octets the
-// commands give it.
-@tier(embedded)
-fn iso_handle_octets(connection_handle: Int) -> [u8]
-    le16_octets(connection_handle & 0x0FFF)
-
 // The parameter octets of the LE Set Host Feature command [v1] ([Vol 4]
 // Part E, Section 7.8.115): Bit_Number and Bit_Value.
 pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_le_set_host_feature(bit_number: Int, enable: Bool) -> [u8]
-    [bit_number as u8, (if enable then 0x01 else 0x00) as u8]
+    var out = hci_buf.buf(2)
+    hci_buf.put8(var out, bit_number)
+    hci_buf.put8(var out, if enable then 0x01 else 0x00)
+    out
 
 // The parameter octets of the LE Set Host Feature command [v2]: a
 // two-octet Bit_Number, then Bit_Value.
 pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_le_set_host_feature_v2(bit_number: Int, enable: Bool) -> [u8]
-    var out = le16_octets(bit_number)
-    list.push(out, (if enable then 0x01 else 0x00) as u8)
+    var out = hci_buf.buf(3)
+    hci_buf.put16(var out, bit_number)
+    hci_buf.put8(var out, if enable then 0x01 else 0x00)
     out
 
 // The parameter octets of the LE Read ISO TX Sync, LE Accept CIS Request,
@@ -1757,7 +1805,9 @@ fn build_le_set_host_feature_v2(bit_number: Int, enable: Bool) -> [u8]
 pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_iso_connection_handle(connection_handle: Int) -> [u8]
-    iso_handle_octets(connection_handle)
+    var out = hci_buf.buf(2)
+    hci_buf.put12(var out, connection_handle)
+    out
 
 // The CIG-wide parameters of the LE Set CIG Parameters command ([Vol 4]
 // Part E, Section 7.8.97).  The two SDU intervals are in microseconds,
@@ -1797,18 +1847,24 @@ fn build_le_set_cig_parameters(cig: CigParameters, cis: [CisParameters]) -> ?[u8
     let n = list.len(cis)
     if n > ISO_CIS_COUNT_MAX or not iso_sdu_interval_ok(cig.sdu_interval_c_to_p) or not iso_sdu_interval_ok(cig.sdu_interval_p_to_c)
         return None
-    var out: [u8] = [cig.cig_id as u8]
-    list.append(out, le24(cig.sdu_interval_c_to_p))
-    list.append(out, le24(cig.sdu_interval_p_to_c))
-    list.append(out, [cig.worst_case_sca as u8, cig.packing as u8, cig.framing as u8])
-    list.append(out, le16_octets(cig.max_transport_latency_c_to_p))
-    list.append(out, le16_octets(cig.max_transport_latency_p_to_c))
-    list.push(out, n as u8)
+    var out = hci_buf.buf(15 + 9 * n)
+    hci_buf.put8(var out, cig.cig_id)
+    hci_buf.put24(var out, cig.sdu_interval_c_to_p)
+    hci_buf.put24(var out, cig.sdu_interval_p_to_c)
+    hci_buf.put8(var out, cig.worst_case_sca)
+    hci_buf.put8(var out, cig.packing)
+    hci_buf.put8(var out, cig.framing)
+    hci_buf.put16(var out, cig.max_transport_latency_c_to_p)
+    hci_buf.put16(var out, cig.max_transport_latency_p_to_c)
+    hci_buf.put8(var out, n)
     for c in cis
-        list.push(out, c.cis_id as u8)
-        list.append(out, le16_octets(c.max_sdu_c_to_p))
-        list.append(out, le16_octets(c.max_sdu_p_to_c))
-        list.append(out, [c.phy_c_to_p as u8, c.phy_p_to_c as u8, c.rtn_c_to_p as u8, c.rtn_p_to_c as u8])
+        hci_buf.put8(var out, c.cis_id)
+        hci_buf.put16(var out, c.max_sdu_c_to_p)
+        hci_buf.put16(var out, c.max_sdu_p_to_c)
+        hci_buf.put8(var out, c.phy_c_to_p)
+        hci_buf.put8(var out, c.phy_p_to_c)
+        hci_buf.put8(var out, c.rtn_c_to_p)
+        hci_buf.put8(var out, c.rtn_p_to_c)
     Some(out)
 
 // The CIG-wide parameters of the LE Set CIG Parameters Test command
@@ -1853,21 +1909,28 @@ fn build_le_set_cig_parameters_test(cig: CigTestParameters, cis: [CisTestParamet
     let n = list.len(cis)
     if n > ISO_CIS_COUNT_MAX or not iso_sdu_interval_ok(cig.sdu_interval_c_to_p) or not iso_sdu_interval_ok(cig.sdu_interval_p_to_c)
         return None
-    var out: [u8] = [cig.cig_id as u8]
-    list.append(out, le24(cig.sdu_interval_c_to_p))
-    list.append(out, le24(cig.sdu_interval_p_to_c))
-    list.append(out, [cig.ft_c_to_p as u8, cig.ft_p_to_c as u8])
-    list.append(out, le16_octets(cig.iso_interval))
-    list.append(out, [cig.worst_case_sca as u8, cig.packing as u8, cig.framing as u8])
-    list.push(out, n as u8)
+    var out = hci_buf.buf(15 + 14 * n)
+    hci_buf.put8(var out, cig.cig_id)
+    hci_buf.put24(var out, cig.sdu_interval_c_to_p)
+    hci_buf.put24(var out, cig.sdu_interval_p_to_c)
+    hci_buf.put8(var out, cig.ft_c_to_p)
+    hci_buf.put8(var out, cig.ft_p_to_c)
+    hci_buf.put16(var out, cig.iso_interval)
+    hci_buf.put8(var out, cig.worst_case_sca)
+    hci_buf.put8(var out, cig.packing)
+    hci_buf.put8(var out, cig.framing)
+    hci_buf.put8(var out, n)
     for c in cis
-        list.push(out, c.cis_id as u8)
-        list.push(out, c.nse as u8)
-        list.append(out, le16_octets(c.max_sdu_c_to_p))
-        list.append(out, le16_octets(c.max_sdu_p_to_c))
-        list.append(out, le16_octets(c.max_pdu_c_to_p))
-        list.append(out, le16_octets(c.max_pdu_p_to_c))
-        list.append(out, [c.phy_c_to_p as u8, c.phy_p_to_c as u8, c.bn_c_to_p as u8, c.bn_p_to_c as u8])
+        hci_buf.put8(var out, c.cis_id)
+        hci_buf.put8(var out, c.nse)
+        hci_buf.put16(var out, c.max_sdu_c_to_p)
+        hci_buf.put16(var out, c.max_sdu_p_to_c)
+        hci_buf.put16(var out, c.max_pdu_c_to_p)
+        hci_buf.put16(var out, c.max_pdu_p_to_c)
+        hci_buf.put8(var out, c.phy_c_to_p)
+        hci_buf.put8(var out, c.phy_p_to_c)
+        hci_buf.put8(var out, c.bn_c_to_p)
+        hci_buf.put8(var out, c.bn_p_to_c)
     Some(out)
 
 // One CIS the LE Create CIS command opens: the handle the LE Set CIG
@@ -1888,10 +1951,11 @@ fn build_le_create_cis(links: [CisLink]) -> ?[u8]
     let n = list.len(links)
     if n < 1 or n > ISO_CIS_COUNT_MAX
         return None
-    var out: [u8] = [n as u8]
+    var out = hci_buf.buf(1 + 4 * n)
+    hci_buf.put8(var out, n)
     for l in links
-        list.append(out, iso_handle_octets(l.cis_connection_handle))
-        list.append(out, iso_handle_octets(l.acl_connection_handle))
+        hci_buf.put12(var out, l.cis_connection_handle)
+        hci_buf.put12(var out, l.acl_connection_handle)
     Some(out)
 
 // The parameter octet of the LE Remove CIG command ([Vol 4] Part E,
@@ -1899,14 +1963,18 @@ fn build_le_create_cis(links: [CisLink]) -> ?[u8]
 pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_le_remove_cig(cig_id: Int) -> [u8]
-    [cig_id as u8]
+    var out = hci_buf.buf(1)
+    hci_buf.put8(var out, cig_id)
+    out
 
 // The parameter octets of the LE Accept CIS Request command ([Vol 4] Part
 // E, Section 7.8.101): the Connection_Handle of the CIS.
 pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_le_accept_cis_request(connection_handle: Int) -> [u8]
-    iso_handle_octets(connection_handle)
+    var out = hci_buf.buf(2)
+    hci_buf.put12(var out, connection_handle)
+    out
 
 // The parameter octets of the LE Reject CIS Request command ([Vol 4]
 // Part E, Section 7.8.102): Connection_Handle of the CIS and the
@@ -1914,8 +1982,9 @@ fn build_le_accept_cis_request(connection_handle: Int) -> [u8]
 pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_le_reject_cis_request(connection_handle: Int, reason: Int) -> [u8]
-    var out = iso_handle_octets(connection_handle)
-    list.push(out, reason as u8)
+    var out = hci_buf.buf(3)
+    hci_buf.put12(var out, connection_handle)
+    hci_buf.put8(var out, reason)
     out
 
 // The 31 parameter octets of the LE Create BIG command ([Vol 4] Part E,
@@ -1932,13 +2001,19 @@ fn build_le_create_big(big_handle: Int, advertising_handle: Int, num_bis: Int, s
                        framing: Int, encryption: Bool, broadcast_code: [u8]) -> ?[u8]
     if num_bis < 1 or num_bis > ISO_BIS_COUNT_MAX or not iso_sdu_interval_ok(sdu_interval) or list.len(broadcast_code) != ISO_BROADCAST_CODE_LENGTH
         return None
-    var out: [u8] = [big_handle as u8, advertising_handle as u8, num_bis as u8]
-    list.append(out, le24(sdu_interval))
-    list.append(out, le16_octets(max_sdu))
-    list.append(out, le16_octets(max_transport_latency))
-    list.append(out,
-        [rtn as u8, phy as u8, packing as u8, framing as u8, (if encryption then 0x01 else 0x00) as u8])
-    list.append(out, broadcast_code)
+    var out = hci_buf.buf(15 + ISO_BROADCAST_CODE_LENGTH)
+    hci_buf.put8(var out, big_handle)
+    hci_buf.put8(var out, advertising_handle)
+    hci_buf.put8(var out, num_bis)
+    hci_buf.put24(var out, sdu_interval)
+    hci_buf.put16(var out, max_sdu)
+    hci_buf.put16(var out, max_transport_latency)
+    hci_buf.put8(var out, rtn)
+    hci_buf.put8(var out, phy)
+    hci_buf.put8(var out, packing)
+    hci_buf.put8(var out, framing)
+    hci_buf.put8(var out, if encryption then 0x01 else 0x00)
+    hci_buf.put_bytes(var out, broadcast_code)
     Some(out)
 
 // The 36 parameter octets of the LE Create BIG Test command ([Vol 4]
@@ -1954,20 +2029,23 @@ fn build_le_create_big_test(big_handle: Int, advertising_handle: Int, num_bis: I
                             pto: Int, encryption: Bool, broadcast_code: [u8]) -> ?[u8]
     if num_bis < 1 or num_bis > ISO_BIS_COUNT_MAX or not iso_sdu_interval_ok(sdu_interval) or list.len(broadcast_code) != ISO_BROADCAST_CODE_LENGTH
         return None
-    var out: [u8] = [big_handle as u8, advertising_handle as u8, num_bis as u8]
-    list.append(out, le24(sdu_interval))
-    list.append(out, le16_octets(iso_interval))
-    list.push(out, nse as u8)
-    list.append(out, le16_octets(max_sdu))
-    list.append(out, le16_octets(max_pdu))
-    list.append(out, [phy as u8,
-        packing as u8,
-        framing as u8,
-        bn as u8,
-        irc as u8,
-        pto as u8,
-        (if encryption then 0x01 else 0x00) as u8])
-    list.append(out, broadcast_code)
+    var out = hci_buf.buf(20 + ISO_BROADCAST_CODE_LENGTH)
+    hci_buf.put8(var out, big_handle)
+    hci_buf.put8(var out, advertising_handle)
+    hci_buf.put8(var out, num_bis)
+    hci_buf.put24(var out, sdu_interval)
+    hci_buf.put16(var out, iso_interval)
+    hci_buf.put8(var out, nse)
+    hci_buf.put16(var out, max_sdu)
+    hci_buf.put16(var out, max_pdu)
+    hci_buf.put8(var out, phy)
+    hci_buf.put8(var out, packing)
+    hci_buf.put8(var out, framing)
+    hci_buf.put8(var out, bn)
+    hci_buf.put8(var out, irc)
+    hci_buf.put8(var out, pto)
+    hci_buf.put8(var out, if encryption then 0x01 else 0x00)
+    hci_buf.put_bytes(var out, broadcast_code)
     Some(out)
 
 // The parameter octets of the LE Terminate BIG command ([Vol 4] Part E,
@@ -1975,7 +2053,10 @@ fn build_le_create_big_test(big_handle: Int, advertising_handle: Int, num_bis: I
 pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_le_terminate_big(big_handle: Int, reason: Int) -> [u8]
-    [big_handle as u8, reason as u8]
+    var out = hci_buf.buf(2)
+    hci_buf.put8(var out, big_handle)
+    hci_buf.put8(var out, reason)
+    out
 
 // The parameter octets of the LE BIG Create Sync command ([Vol 4] Part
 // E, Section 7.8.106): BIG_Handle, Sync_Handle of the periodic
@@ -1991,15 +2072,16 @@ fn build_le_big_create_sync(big_handle: Int, sync_handle: Int, encryption: Bool,
     let n = list.len(bis)
     if n < 1 or n > ISO_BIS_COUNT_MAX or list.len(broadcast_code) != ISO_BROADCAST_CODE_LENGTH
         return None
-    var out: [u8] = [big_handle as u8]
-    list.append(out, iso_handle_octets(sync_handle))
-    list.push(out, (if encryption then 0x01 else 0x00) as u8)
-    list.append(out, broadcast_code)
-    list.push(out, mse as u8)
-    list.append(out, le16_octets(big_sync_timeout))
-    list.push(out, n as u8)
+    var out = hci_buf.buf(7 + ISO_BROADCAST_CODE_LENGTH + n + 3)
+    hci_buf.put8(var out, big_handle)
+    hci_buf.put12(var out, sync_handle)
+    hci_buf.put8(var out, if encryption then 0x01 else 0x00)
+    hci_buf.put_bytes(var out, broadcast_code)
+    hci_buf.put8(var out, mse)
+    hci_buf.put16(var out, big_sync_timeout)
+    hci_buf.put8(var out, n)
     for b in bis
-        list.push(out, b as u8)
+        hci_buf.put8(var out, b)
     Some(out)
 
 // The parameter octet of the LE BIG Terminate Sync command ([Vol 4] Part
@@ -2007,7 +2089,9 @@ fn build_le_big_create_sync(big_handle: Int, sync_handle: Int, encryption: Bool,
 pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_le_big_terminate_sync(big_handle: Int) -> [u8]
-    [big_handle as u8]
+    var out = hci_buf.buf(1)
+    hci_buf.put8(var out, big_handle)
+    out
 
 // The Codec_ID of the LE Setup ISO Data Path command, 5 octets: the
 // Coding_Format, then the Company_ID and the Vendor_Specific_Codec_ID,
@@ -2028,9 +2112,10 @@ pub const ISO_CODING_FORMAT_VENDOR_SPECIFIC = 0xFF
 pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn iso_codec_id(coding_format: Int, company_id: Int, vendor_specific_codec_id: Int) -> [u8]
-    var out: [u8] = [coding_format as u8]
-    list.append(out, le16_octets(company_id))
-    list.append(out, le16_octets(vendor_specific_codec_id))
+    var out = hci_buf.buf(5)
+    hci_buf.put8(var out, coding_format)
+    hci_buf.put16(var out, company_id)
+    hci_buf.put16(var out, vendor_specific_codec_id)
     out
 
 // The parameter octets of the LE Setup ISO Data Path command ([Vol 4]
@@ -2046,12 +2131,14 @@ fn build_le_setup_iso_data_path(connection_handle: Int, direction: Int, data_pat
                                 codec_configuration: [u8]) -> ?[u8]
     if list.len(codec_id) != 5 or list.len(codec_configuration) > 255
         return None
-    var out = iso_handle_octets(connection_handle)
-    list.append(out, [direction as u8, data_path_id as u8])
-    list.append(out, codec_id)
-    list.append(out, le24(controller_delay))
-    list.push(out, list.len(codec_configuration) as u8)
-    list.append(out, codec_configuration)
+    var out = hci_buf.buf(13 + list.len(codec_configuration))
+    hci_buf.put12(var out, connection_handle)
+    hci_buf.put8(var out, direction)
+    hci_buf.put8(var out, data_path_id)
+    hci_buf.put_bytes(var out, codec_id)
+    hci_buf.put24(var out, controller_delay)
+    hci_buf.put8(var out, list.len(codec_configuration))
+    hci_buf.put_bytes(var out, codec_configuration)
     Some(out)
 
 // The parameter octets of the LE Remove ISO Data Path command ([Vol 4]
@@ -2060,8 +2147,9 @@ fn build_le_setup_iso_data_path(connection_handle: Int, direction: Int, data_pat
 pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_le_remove_iso_data_path(connection_handle: Int, data_path_direction: Int) -> [u8]
-    var out = iso_handle_octets(connection_handle)
-    list.push(out, data_path_direction as u8)
+    var out = hci_buf.buf(3)
+    hci_buf.put12(var out, connection_handle)
+    hci_buf.put8(var out, data_path_direction)
     out
 
 // The parameter octets of the LE ISO Transmit Test and LE ISO Receive
@@ -2070,8 +2158,9 @@ fn build_le_remove_iso_data_path(connection_handle: Int, data_path_direction: In
 pub @satisfies("REQ-BLE-HCI-057")
 @tier(embedded)
 fn build_le_iso_test(connection_handle: Int, payload_type: Int) -> [u8]
-    var out = iso_handle_octets(connection_handle)
-    list.push(out, payload_type as u8)
+    var out = hci_buf.buf(3)
+    hci_buf.put12(var out, connection_handle)
+    hci_buf.put8(var out, payload_type)
     out
 
 // Bits 24 to 29, 33 and 41 of the LE event mask are the events of the
@@ -2191,13 +2280,15 @@ pub @tier(embedded)
 fn build_connection_parameters(connection_handle: Int, interval_min: Int, interval_max: Int,
                                latency: Int, timeout: Int, min_ce_length: Int,
                                max_ce_length: Int) -> [u8]
-    [(connection_handle & 0xFF) as u8, ((connection_handle >>> 8) & 0x0F) as u8,
-     (interval_min & 0xFF) as u8, ((interval_min >>> 8) & 0xFF) as u8,
-     (interval_max & 0xFF) as u8, ((interval_max >>> 8) & 0xFF) as u8,
-     (latency & 0xFF) as u8, ((latency >>> 8) & 0xFF) as u8,
-     (timeout & 0xFF) as u8, ((timeout >>> 8) & 0xFF) as u8,
-     (min_ce_length & 0xFF) as u8, ((min_ce_length >>> 8) & 0xFF) as u8,
-     (max_ce_length & 0xFF) as u8, ((max_ce_length >>> 8) & 0xFF) as u8]
+    var out = hci_buf.buf(14)
+    hci_buf.put12(var out, connection_handle)
+    hci_buf.put16(var out, interval_min)
+    hci_buf.put16(var out, interval_max)
+    hci_buf.put16(var out, latency)
+    hci_buf.put16(var out, timeout)
+    hci_buf.put16(var out, min_ce_length)
+    hci_buf.put16(var out, max_ce_length)
+    out
 
 // The 25 parameter octets of the LE Create Connection command: the
 // scanning intervals and the initiator filter policy, the peer's
@@ -2212,19 +2303,19 @@ fn build_le_create_connection(scan_interval: Int, scan_window: Int, filter_polic
                               peer_address_type: Int, peer_address: [u8], own_address_type: Int,
                               interval_min: Int, interval_max: Int, latency: Int, timeout: Int,
                               min_ce_length: Int, max_ce_length: Int) -> [u8]
-    var out: [u8] = [
-        (scan_interval & 0xFF) as u8, ((scan_interval >>> 8) & 0xFF) as u8,
-        (scan_window & 0xFF) as u8, ((scan_window >>> 8) & 0xFF) as u8,
-        filter_policy as u8,
-        peer_address_type as u8]
-    list.append(out, peer_address[0:6])
-    list.append(out, [own_address_type as u8,
-        (interval_min & 0xFF) as u8, ((interval_min >>> 8) & 0xFF) as u8,
-        (interval_max & 0xFF) as u8, ((interval_max >>> 8) & 0xFF) as u8,
-        (latency & 0xFF) as u8, ((latency >>> 8) & 0xFF) as u8,
-        (timeout & 0xFF) as u8, ((timeout >>> 8) & 0xFF) as u8,
-        (min_ce_length & 0xFF) as u8, ((min_ce_length >>> 8) & 0xFF) as u8,
-        (max_ce_length & 0xFF) as u8, ((max_ce_length >>> 8) & 0xFF) as u8])
+    var out = hci_buf.buf(25)
+    hci_buf.put16(var out, scan_interval)
+    hci_buf.put16(var out, scan_window)
+    hci_buf.put8(var out, filter_policy)
+    hci_buf.put8(var out, peer_address_type)
+    hci_buf.put_range(var out, peer_address, 0, 6)
+    hci_buf.put8(var out, own_address_type)
+    hci_buf.put16(var out, interval_min)
+    hci_buf.put16(var out, interval_max)
+    hci_buf.put16(var out, latency)
+    hci_buf.put16(var out, timeout)
+    hci_buf.put16(var out, min_ce_length)
+    hci_buf.put16(var out, max_ce_length)
     out
 
 // The 26 parameter octets of the LE Extended Create Connection command on the LE 1M
@@ -2240,17 +2331,20 @@ fn build_le_extended_create_connection(scan_interval: Int, scan_window: Int, fil
                                        own_address_type: Int, interval_min: Int, interval_max: Int,
                                        latency: Int, timeout: Int, min_ce_length: Int,
                                        max_ce_length: Int) -> [u8]
-    var out: [u8] = [filter_policy as u8, own_address_type as u8, peer_address_type as u8]
-    list.append(out, peer_address[0:6])
-    list.append(out, [0x01,
-        (scan_interval & 0xFF) as u8, ((scan_interval >>> 8) & 0xFF) as u8,
-        (scan_window & 0xFF) as u8, ((scan_window >>> 8) & 0xFF) as u8,
-        (interval_min & 0xFF) as u8, ((interval_min >>> 8) & 0xFF) as u8,
-        (interval_max & 0xFF) as u8, ((interval_max >>> 8) & 0xFF) as u8,
-        (latency & 0xFF) as u8, ((latency >>> 8) & 0xFF) as u8,
-        (timeout & 0xFF) as u8, ((timeout >>> 8) & 0xFF) as u8,
-        (min_ce_length & 0xFF) as u8, ((min_ce_length >>> 8) & 0xFF) as u8,
-        (max_ce_length & 0xFF) as u8, ((max_ce_length >>> 8) & 0xFF) as u8])
+    var out = hci_buf.buf(26)
+    hci_buf.put8(var out, filter_policy)
+    hci_buf.put8(var out, own_address_type)
+    hci_buf.put8(var out, peer_address_type)
+    hci_buf.put_range(var out, peer_address, 0, 6)
+    hci_buf.put8(var out, 0x01)
+    hci_buf.put16(var out, scan_interval)
+    hci_buf.put16(var out, scan_window)
+    hci_buf.put16(var out, interval_min)
+    hci_buf.put16(var out, interval_max)
+    hci_buf.put16(var out, latency)
+    hci_buf.put16(var out, timeout)
+    hci_buf.put16(var out, min_ce_length)
+    hci_buf.put16(var out, max_ce_length)
     out
 
 // The parameters of a command that names only a connection and one
@@ -2258,13 +2352,18 @@ fn build_le_extended_create_connection(scan_interval: Int, scan_window: Int, fil
 // Reply command takes Connection_Handle and Reason.
 pub @tier(embedded)
 fn build_handle_and_reason(connection_handle: Int, reason: Int) -> [u8]
-    [(connection_handle & 0xFF) as u8, ((connection_handle >>> 8) & 0x0F) as u8, reason as u8]
+    var out = hci_buf.buf(3)
+    hci_buf.put12(var out, connection_handle)
+    hci_buf.put8(var out, reason)
+    out
 
 // The parameter of the LE Long Term Key Request Negative Reply command
 // ([Vol 4] Part E, Section 7.8.26): Connection_Handle.
 pub @tier(embedded)
 fn build_connection_handle(connection_handle: Int) -> [u8]
-    [(connection_handle & 0xFF) as u8, ((connection_handle >>> 8) & 0x0F) as u8]
+    var out = hci_buf.buf(2)
+    hci_buf.put12(var out, connection_handle)
+    out
 
 // The 14 parameter octets of the LE Periodic Advertising Create Sync
 // command ([Vol 4] Part E, Section 7.8.67): Options, Advertising_SID,
@@ -2279,11 +2378,14 @@ fn build_le_periodic_advertising_create_sync(options: Int, advertising_sid: Int,
     if (options & 0xF8) != 0 or sync_timeout < PERIODIC_SYNC_TIMEOUT_RANGE_MIN or sync_timeout > PERIODIC_SYNC_TIMEOUT_RANGE_MAX
         None
     else
-        var out: [u8] = [options as u8, advertising_sid as u8, advertiser_address_type as u8]
-        list.append(out, advertiser_address[0:6])
-        list.append(out, [(skip & 0xFF) as u8, ((skip >>> 8) & 0xFF) as u8,
-                          (sync_timeout & 0xFF) as u8, ((sync_timeout >>> 8) & 0xFF) as u8,
-                          cte_type as u8])
+        var out = hci_buf.buf(14)
+        hci_buf.put8(var out, options)
+        hci_buf.put8(var out, advertising_sid)
+        hci_buf.put8(var out, advertiser_address_type)
+        hci_buf.put_range(var out, advertiser_address, 0, 6)
+        hci_buf.put16(var out, skip)
+        hci_buf.put16(var out, sync_timeout)
+        hci_buf.put8(var out, cte_type)
         Some(out)
 
 // The 2 parameter octets of the LE Periodic Advertising Terminate Sync
@@ -2291,15 +2393,18 @@ fn build_le_periodic_advertising_create_sync(options: Int, advertising_sid: Int,
 pub @satisfies("REQ-BLE-HCI-055")
 @tier(embedded)
 fn build_le_periodic_advertising_terminate_sync(sync_handle: Int) -> [u8]
-    [(sync_handle & 0xFF) as u8, ((sync_handle >>> 8) & 0x0F) as u8]
+    var out = hci_buf.buf(2)
+    hci_buf.put12(var out, sync_handle)
+    out
 
 // The parameters of the LE Long Term Key Request Reply command ([Vol 4]
 // Part E, Section 7.8.25): Connection_Handle, then the 16 octets of
 // Long_Term_Key, least significant octet first.
 pub @tier(embedded)
 fn build_le_long_term_key_request_reply(connection_handle: Int, ltk: [u8]) -> [u8]
-    var out = build_connection_handle(connection_handle)
-    list.append(out, ltk)
+    var out = hci_buf.buf(2 + list.len(ltk))
+    hci_buf.put12(var out, connection_handle)
+    hci_buf.put_bytes(var out, ltk)
     out
 
 // The parameters of the LE Start Encryption command ([Vol 4] Part E,
@@ -2312,8 +2417,9 @@ fn build_le_long_term_key_request_reply(connection_handle: Int, ltk: [u8]) -> [u
 pub @tier(embedded)
 fn build_le_start_encryption(connection_handle: Int, rand_number: [u8], ediv: Int,
                              ltk: [u8]) -> [u8]
-    var out = build_connection_handle(connection_handle)
-    list.append(out, rand_number[0:8])
-    list.append(out, [(ediv & 0xFF) as u8, ((ediv >>> 8) & 0xFF) as u8])
-    list.append(out, ltk[0:16])
+    var out = hci_buf.buf(28)
+    hci_buf.put12(var out, connection_handle)
+    hci_buf.put_range(var out, rand_number, 0, 8)
+    hci_buf.put16(var out, ediv)
+    hci_buf.put_range(var out, ltk, 0, 16)
     out

@@ -14,15 +14,7 @@
 use hci_frame
 use hci_commands
 use hci_h4
-
-// ── Internal helpers ────────────────────────────────────────────────
-
-// Emit a u16 as two LE bytes (low, high).
-@tier(embedded)
-fn le16_bytes(v: Int) -> [u8]
-    let lo = (v & 0xFF) as u8
-    let hi = ((v >>> 8) & 0xFF) as u8
-    [lo, hi]
+use hci_buf
 
 // ── Build a complete HCI Command PDU (no H4 prefix) ─────────────────
 //
@@ -39,10 +31,11 @@ fn le16_bytes(v: Int) -> [u8]
 pub @satisfies("REQ-BLE-HCI-001")
 @tier(embedded)
 fn build_command(opcode: Int, params: [u8]) -> [u8]
-    var hdr: [u8] = list.with_capacity(3 + list.len(params))
-    list.append(hdr, [(opcode & 0xFF) as u8, ((opcode >>> 8) & 0xFF) as u8, list.len(params) as u8])
-    list.append(hdr, params)
-    hdr
+    var out = hci_buf.buf(3 + list.len(params))
+    hci_buf.put16(var out, opcode)
+    hci_buf.put8(var out, list.len(params))
+    hci_buf.put_bytes(var out, params)
+    out
 
 // The H4 frame of the command `opcode` with `params`: the type byte 0x01, then the packet `build_command` builds.
 //
@@ -50,7 +43,12 @@ fn build_command(opcode: Int, params: [u8]) -> [u8]
 pub @satisfies("REQ-BLE-H4-001")
 @tier(embedded)
 fn build_h4_command(opcode: Int, params: [u8]) -> [u8]
-    hci_h4.frame_h4(hci_h4.PKT_COMMAND, build_command(opcode, params))
+    var out = hci_buf.buf(4 + list.len(params))
+    hci_buf.put8(var out, hci_h4.PKT_COMMAND)
+    hci_buf.put16(var out, opcode)
+    hci_buf.put8(var out, list.len(params))
+    hci_buf.put_bytes(var out, params)
+    out
 
 // ── Command builders for the supported subset ───────────────────────
 //
@@ -62,26 +60,26 @@ fn build_h4_command(opcode: Int, params: [u8]) -> [u8]
 pub @satisfies("REQ-BLE-HCI-004")
 @tier(embedded)
 fn cmd_hci_reset() -> [u8]
-    build_h4_command(hci_commands.opcode_hci_reset(), [])
+    build_h4_command(hci_commands.opcode_hci_reset(), hci_buf.empty())
 
 // The H4 frame of Read BD_ADDR, which has no parameters ([Vol 4] Part E, Section 7.4.6).
 pub @satisfies("REQ-BLE-HCI-005")
 @tier(embedded)
 fn cmd_read_bd_addr() -> [u8]
-    build_h4_command(hci_commands.opcode_read_bd_addr(), [])
+    build_h4_command(hci_commands.opcode_read_bd_addr(), hci_buf.empty())
 
 // The H4 frame of LE Read Buffer Size, which has no parameters ([Vol 4] Part E, Section 7.8.2).
 pub @satisfies("REQ-BLE-HCI-011")
 @satisfies("REQ-BLE-LL-066")
 @tier(embedded)
 fn cmd_le_read_buffer_size() -> [u8]
-    build_h4_command(hci_commands.opcode_le_read_buffer_size(), [])
+    build_h4_command(hci_commands.opcode_le_read_buffer_size(), hci_buf.empty())
 
 // The H4 frame of LE Read Local Supported Features, which has no parameters ([Vol 4] Part E, Section 7.8.3).
 pub @satisfies("REQ-BLE-HCI-012")
 @tier(embedded)
 fn cmd_le_read_local_supported_features() -> [u8]
-    build_h4_command(hci_commands.opcode_le_read_local_supported_features(), [])
+    build_h4_command(hci_commands.opcode_le_read_local_supported_features(), hci_buf.empty())
 
 // The H4 frame of LE Set Random Address for the six octets `bd_addr`, least significant octet first ([Vol 4] Part E,
 // Section 7.8.4).
@@ -341,26 +339,29 @@ fn le_advertising_reports(evt: [u8]) -> ?[AdvertisingReport]
     let count = evt[3] as Int
     if count < 1 or count > 0x19
         return None
-    var reports: [AdvertisingReport] = []
-    var at = 4
-    for _ in 0..count
-        // Event_Type, Address_Type, Address and Data_Length: 9 octets.
-        if at + 9 > n
+    // The reports are records with byte payloads, so they are boxed: the list and each record are explicit
+    // allocations, one block each, bounded by the 0x19 reports of the event.
+    system
+        var reports: [AdvertisingReport] = list.with_capacity(count)
+        var at = 4
+        for _ in 0..count
+            // Event_Type, Address_Type, Address and Data_Length: 9 octets.
+            if at + 9 > n
+                return None
+            let data_len = evt[at + 8] as Int
+            if data_len > ADV_REPORT_DATA_MAX or at + 9 + data_len + 1 > n
+                return None
+            let data_end = at + 9 + data_len
+            let _ = list.try_push(reports, AdvertisingReport {
+                event_type: evt[at] as Int,
+                address_type: evt[at + 1] as Int,
+                address: hci_buf.slice(evt, at + 2, at + 8),
+                data: hci_buf.slice(evt, at + 9, data_end),
+                rssi: evt[data_end] as Int })
+            at = data_end + 1
+        if at != n
             return None
-        let data_len = evt[at + 8] as Int
-        if data_len > ADV_REPORT_DATA_MAX or at + 9 + data_len + 1 > n
-            return None
-        let data_end = at + 9 + data_len
-        list.push(reports, AdvertisingReport {
-            event_type: evt[at] as Int,
-            address_type: evt[at + 1] as Int,
-            address: evt[at + 2:at + 8],
-            data: evt[at + 9:data_end],
-            rssi: evt[data_end] as Int })
-        at = data_end + 1
-    if at != n
-        return None
-    Some(reports)
+        Some(reports)
 
 // ── LE Connection Complete event, [Vol 4] Part E, Section 7.7.65.1 ──
 //
@@ -449,15 +450,16 @@ fn le_connection_complete(evt: [u8]) -> ?LeConnectionComplete
     if n != 21 + skip or (evt[1] as Int) != n - 2
         return None
     let t = 13 + skip
-    Some(LeConnectionComplete {
-        status: evt[3] as Int,
-        connection_handle: le16_at(evt, 4) & 0x0FFF,
-        role: evt[6] as Int,
-        peer_address_type: evt[7] as Int,
-        peer_address: evt[8:14],
-        connection_interval: le16_at(evt, t + 1),
-        peripheral_latency: le16_at(evt, t + 3),
-        supervision_timeout: le16_at(evt, t + 5) })
+    system
+        Some(LeConnectionComplete {
+            status: evt[3] as Int,
+            connection_handle: le16_at(evt, 4) & 0x0FFF,
+            role: evt[6] as Int,
+            peer_address_type: evt[7] as Int,
+            peer_address: hci_buf.slice(evt, 8, 14),
+            connection_interval: le16_at(evt, t + 1),
+            peripheral_latency: le16_at(evt, t + 3),
+            supervision_timeout: le16_at(evt, t + 5) })
 
 // ── Disconnection Complete event, [Vol 4] Part E, Section 7.7.5 ─────
 //
@@ -466,7 +468,8 @@ fn le_connection_complete(evt: [u8]) -> ?LeConnectionComplete
 
 // The parameters of a Disconnection Complete event ([Vol 4] Part E, Section 7.7.5): `status`, the 12-bit `connection_handle`
 // and the `reason` for the disconnection.
-pub struct DisconnectionComplete
+pub @value
+struct DisconnectionComplete
     status: Int
     connection_handle: Int
     reason: Int
@@ -531,21 +534,24 @@ fn acl_data_packet(pkt: [u8]) -> ?AclDataPacket
     let total = le16_at(pkt, 2)
     if n != ACL_HEADER_LEN + total
         return None
-    Some(AclDataPacket {
-        connection_handle: le16_at(pkt, 0) & 0x0FFF,
-        packet_boundary: (pkt[1] as Int >>> 4) & 0x03,
-        broadcast: (pkt[1] as Int >>> 6) & 0x03,
-        data: pkt[ACL_HEADER_LEN:n] })
+    system
+        Some(AclDataPacket {
+            connection_handle: le16_at(pkt, 0) & 0x0FFF,
+            packet_boundary: (pkt[1] as Int >>> 4) & 0x03,
+            broadcast: (pkt[1] as Int >>> 6) & 0x03,
+            data: hci_buf.slice(pkt, ACL_HEADER_LEN, n) })
 
 // An HCI ACL Data packet with its HCI packet indicator, point-to-point,
 // for `connection_handle` with `packet_boundary` and `data`.
 pub @tier(embedded)
 fn build_h4_acl(connection_handle: Int, packet_boundary: Int, data: [u8]) -> [u8]
     let n = list.len(data)
-    var pkt: [u8] = list.with_capacity(5 + list.len(data))
-    list.append(pkt, [hci_h4.PKT_ACL, (connection_handle & 0xFF) as u8, (((connection_handle >>> 8) & 0x0F) | ((packet_boundary & 0x03) << 4)) as u8,
-        (n & 0xFF) as u8, ((n >>> 8) & 0xFF) as u8])
-    list.append(pkt, data)
+    var pkt = hci_buf.buf(5 + n)
+    hci_buf.put8(var pkt, hci_h4.PKT_ACL)
+    hci_buf.put8(var pkt, connection_handle)
+    hci_buf.put8(var pkt, ((connection_handle >>> 8) & 0x0F) | ((packet_boundary & 0x03) << 4))
+    hci_buf.put16(var pkt, n)
+    hci_buf.put_bytes(var pkt, data)
     pkt
 
 // ── Number Of Completed Packets event, [Vol 4] Part E, Section 7.7.19 ─
@@ -556,7 +562,8 @@ fn build_h4_acl(connection_handle: Int, packet_boundary: Int, data: [u8]) -> [u8
 //   ([Vol 4] Part E, Section 5.2).
 
 // The packets one Handle has completed since the last event.
-pub struct CompletedPackets
+pub @value
+struct CompletedPackets
     connection_handle: Int
     count: Int
 
@@ -571,10 +578,10 @@ fn number_of_completed_packets(evt: [u8]) -> ?[CompletedPackets]
     let count = evt[2] as Int
     if (evt[1] as Int) != n - 2 or n != 3 + 4 * count
         return None
-    var out: [CompletedPackets] = []
+    var out: [CompletedPackets] = list.with_capacity(count)
     for i in 0..count
         let at = 3 + 4 * i
-        list.push(out, CompletedPackets { connection_handle: le16_at(evt, at) & 0x0FFF,
+        let _ = list.try_push(out, CompletedPackets { connection_handle: le16_at(evt, at) & 0x0FFF,
             count: le16_at(evt, at + 2) })
     Some(out)
 
@@ -591,7 +598,8 @@ pub const LE_SUBEVENT_CONNECTION_UPDATE_COMPLETE = 0x03
 //
 // `status` is 0 for success.  `connection_interval` is in 1.25 ms units, `peripheral_latency` in connection events and
 // `supervision_timeout` in 10 ms units.
-pub struct LeConnectionUpdateComplete
+pub @value
+struct LeConnectionUpdateComplete
     status: Int
     connection_handle: Int
     connection_interval: Int
@@ -634,10 +642,11 @@ fn le_long_term_key_request(evt: [u8]) -> ?LeLongTermKeyRequest
     if le_meta_subevent(evt) != LE_SUBEVENT_LONG_TERM_KEY_REQUEST or list.len(evt) != 15 or (evt[1] as Int) != 13
         None
     else
-        Some(LeLongTermKeyRequest {
-            connection_handle: le16_at(evt, 3) & 0x0FFF,
-            random_number: evt[5:13],
-            encrypted_diversifier: le16_at(evt, 13) })
+        system
+            Some(LeLongTermKeyRequest {
+                connection_handle: le16_at(evt, 3) & 0x0FFF,
+                random_number: hci_buf.slice(evt, 5, 13),
+                encrypted_diversifier: le16_at(evt, 13) })
 
 // ── LE Remote Connection Parameter Request event, [Vol 4] Part E,
 //    Section 7.7.65.6
@@ -650,7 +659,8 @@ pub const LE_SUBEVENT_REMOTE_CONNECTION_PARAMETER_REQUEST = 0x06
 
 // The parameters of an LE Remote Connection Parameter Request event: the 12-bit `connection_handle` and the peer's requested
 // `interval_min` and `interval_max` (1.25 ms units), `max_latency` (connection events) and `timeout` (10 ms units).
-pub struct LeRemoteConnectionParameterRequest
+pub @value
+struct LeRemoteConnectionParameterRequest
     connection_handle: Int
     interval_min: Int
     interval_max: Int
@@ -697,7 +707,8 @@ fn is_encryption_event(evt: [u8]) -> Bool
 // stays encrypted with a new key.  `enabled` is true when the link is
 // encrypted after the change: a Status of Success with
 // Encryption_Enabled not 0x00, or a refresh with Status Success.
-pub struct EncryptionChange
+pub @value
+struct EncryptionChange
     status: Int
     connection_handle: Int
     enabled: Bool
@@ -725,7 +736,8 @@ fn encryption_change(evt: [u8]) -> ?EncryptionChange
 // The LE_ACL_Data_Packet_Length and Total_Num_LE_ACL_Data_Packets of the
 // LE Read Buffer Size command [v1] ([Vol 4] Part E, Section 7.8.2), from
 // the return parameters that follow Status.
-pub struct LeBufferSize
+pub @value
+struct LeBufferSize
     acl_data_packet_length: Int
     total_acl_data_packets: Int
 
@@ -756,9 +768,9 @@ fn le_buffer_size(return_parameters: [u8]) -> ?LeBufferSize
 pub @tier(embedded)
 fn command_complete_return_parameters(evt: [u8]) -> [u8]
     if list.len(evt) < 6
-        []
+        hci_buf.empty()
     else
-        evt[6:]
+        hci_buf.slice(evt, 6, list.len(evt))
 
 // The return parameters of the LE Read Buffer Size command [v2]
 // ([Vol 4] Part E, Section 7.8.2): the ACL half of the [v1] form, then
@@ -826,10 +838,12 @@ fn le_set_cig_parameters_return(return_parameters: [u8]) -> ?CigParametersReturn
     let n = return_parameters[1] as Int
     if list.len(return_parameters) != 2 + 2 * n
         return None
-    var handles: [Int] = []
-    for i in 0..n
-        list.push(handles, le16_at(return_parameters, 2 + 2 * i) & 0x0FFF)
-    Some(CigParametersReturn { cig_id: return_parameters[0] as Int, connection_handles: handles })
+    // The handles are a list of `Int` and the record holds a list, so both are boxed: the explicit allocations of the reader.
+    system
+        var handles: [Int] = list.with_capacity(n)
+        for i in 0..n
+            let _ = list.try_push(handles, le16_at(return_parameters, 2 + 2 * i) & 0x0FFF)
+        Some(CigParametersReturn { cig_id: return_parameters[0] as Int, connection_handles: handles })
 
 // The Connection_Handle that the LE Reject CIS Request, LE Setup ISO
 // Data Path, LE Remove ISO Data Path, LE ISO Transmit Test and LE ISO
@@ -1077,10 +1091,12 @@ pub const CREATE_BIG_COMPLETE_FIXED = 21
 // The caller has checked that `evt` is long enough; a short `evt` is an error.
 pub @tier(embedded)
 fn iso_handle_list(evt: [u8], at: Int, count: Int) -> [Int]
-    var handles: [Int] = []
-    for i in 0..count
-        list.push(handles, le16_at(evt, at + 2 * i) & 0x0FFF)
-    handles
+    // A list of `Int` keeps each element in a cell of its own, so the list is an explicit allocation.
+    system
+        var handles: [Int] = list.with_capacity(count)
+        for i in 0..count
+            let _ = list.try_push(handles, le16_at(evt, at + 2 * i) & 0x0FFF)
+        handles
 
 // The parameters of an LE Create BIG Complete event, given without its HCI packet indicator, or None for any other event or one
 // whose length disagrees with its Num_BIS.
@@ -1092,19 +1108,20 @@ fn le_create_big_complete(evt: [u8]) -> ?CreateBigComplete
     let n = evt[20] as Int
     if not iso_event_shape(evt, LE_SUBEVENT_CREATE_BIG_COMPLETE, CREATE_BIG_COMPLETE_FIXED + 2 * n)
         return None
-    Some(CreateBigComplete {
-        status: evt[3] as Int,
-        big_handle: evt[4] as Int,
-        big_sync_delay: le24_at(evt, 5),
-        transport_latency_big: le24_at(evt, 8),
-        phy: evt[11] as Int,
-        nse: evt[12] as Int,
-        bn: evt[13] as Int,
-        pto: evt[14] as Int,
-        irc: evt[15] as Int,
-        max_pdu: le16_at(evt, 16),
-        iso_interval: le16_at(evt, 18),
-        connection_handles: iso_handle_list(evt, 21, n) })
+    system
+        Some(CreateBigComplete {
+            status: evt[3] as Int,
+            big_handle: evt[4] as Int,
+            big_sync_delay: le24_at(evt, 5),
+            transport_latency_big: le24_at(evt, 8),
+            phy: evt[11] as Int,
+            nse: evt[12] as Int,
+            bn: evt[13] as Int,
+            pto: evt[14] as Int,
+            irc: evt[15] as Int,
+            max_pdu: le16_at(evt, 16),
+            iso_interval: le16_at(evt, 18),
+            connection_handles: iso_handle_list(evt, 21, n) })
 
 // The parameters of an LE Terminate BIG Complete event ([Vol 4] Part E, Section 7.7.65.28): the `big_handle` and the `reason` the
 // BIG ended.
@@ -1152,17 +1169,18 @@ fn le_big_sync_established(evt: [u8]) -> ?BigSyncEstablished
     let n = evt[16] as Int
     if not iso_event_shape(evt, LE_SUBEVENT_BIG_SYNC_ESTABLISHED, BIG_SYNC_ESTABLISHED_FIXED + 2 * n)
         return None
-    Some(BigSyncEstablished {
-        status: evt[3] as Int,
-        big_handle: evt[4] as Int,
-        transport_latency_big: le24_at(evt, 5),
-        nse: evt[8] as Int,
-        bn: evt[9] as Int,
-        pto: evt[10] as Int,
-        irc: evt[11] as Int,
-        max_pdu: le16_at(evt, 12),
-        iso_interval: le16_at(evt, 14),
-        connection_handles: iso_handle_list(evt, 17, n) })
+    system
+        Some(BigSyncEstablished {
+            status: evt[3] as Int,
+            big_handle: evt[4] as Int,
+            transport_latency_big: le24_at(evt, 5),
+            nse: evt[8] as Int,
+            bn: evt[9] as Int,
+            pto: evt[10] as Int,
+            irc: evt[11] as Int,
+            max_pdu: le16_at(evt, 12),
+            iso_interval: le16_at(evt, 14),
+            connection_handles: iso_handle_list(evt, 17, n) })
 
 // The parameters of an LE BIG Sync Lost event ([Vol 4] Part E, Section 7.7.65.30): the `big_handle` and the `reason` the
 // synchronization ended.
@@ -1317,10 +1335,11 @@ fn iso_data_packet(pkt: [u8]) -> ?IsoDataPacket
     if not iso_pb_has_sdu_header(pb)
         if ts
             return None
-        return Some(IsoDataPacket {
-            connection_handle: handle, pb_flag: pb, has_sdu_header: false, has_time_stamp: false,
-            time_stamp: 0, packet_sequence_number: 0, iso_sdu_length: 0, packet_status: 0,
-            data: pkt[ISO_HEADER_LEN:n] })
+        system
+            return Some(IsoDataPacket {
+                connection_handle: handle, pb_flag: pb, has_sdu_header: false, has_time_stamp: false,
+                time_stamp: 0, packet_sequence_number: 0, iso_sdu_length: 0, packet_status: 0,
+                data: hci_buf.slice(pkt, ISO_HEADER_LEN, n) })
     let load = ISO_HEADER_LEN + (if ts then ISO_TIME_STAMP_LEN else 0)
     if n < load + ISO_SDU_HEADER_LEN
         return None
@@ -1329,13 +1348,14 @@ fn iso_data_packet(pkt: [u8]) -> ?IsoDataPacket
     else
         0
     let sdu_word = le16_at(pkt, load + 2)
-    Some(IsoDataPacket {
-        connection_handle: handle, pb_flag: pb, has_sdu_header: true, has_time_stamp: ts,
-        time_stamp: time_stamp,
-        packet_sequence_number: le16_at(pkt, load),
-        iso_sdu_length: sdu_word & ISO_SDU_LENGTH_MAX,
-        packet_status: (sdu_word >>> 14) & 0x03,
-        data: pkt[load + ISO_SDU_HEADER_LEN:n] })
+    system
+        Some(IsoDataPacket {
+            connection_handle: handle, pb_flag: pb, has_sdu_header: true, has_time_stamp: ts,
+            time_stamp: time_stamp,
+            packet_sequence_number: le16_at(pkt, load),
+            iso_sdu_length: sdu_word & ISO_SDU_LENGTH_MAX,
+            packet_status: (sdu_word >>> 14) & 0x03,
+            data: hci_buf.slice(pkt, load + ISO_SDU_HEADER_LEN, n) })
 
 // The HCI ISO Data packet for `p`, without its HCI packet indicator, or
 // None when a field does not fit its width: a Connection_Handle above
@@ -1351,7 +1371,6 @@ fn build_iso_data_packet(p: IsoDataPacket) -> ?[u8]
     let has_header = iso_pb_has_sdu_header(p.pb_flag)
     if not has_header and p.has_time_stamp
         return None
-    var load: [u8] = []
     if has_header
         if p.iso_sdu_length < 0 or p.iso_sdu_length > ISO_SDU_LENGTH_MAX or p.packet_status < 0 or p.packet_status > 3
             return None
@@ -1359,20 +1378,27 @@ fn build_iso_data_packet(p: IsoDataPacket) -> ?[u8]
             return None
         if p.has_time_stamp and (p.time_stamp < 0 or p.time_stamp > 0xFFFFFFFF)
             return None
-        if p.has_time_stamp
-            list.append(load, hci_commands.le32_octets(p.time_stamp))
-        list.append(load, le16_bytes(p.packet_sequence_number))
-        list.append(load, le16_bytes(p.iso_sdu_length | (p.packet_status << 14)))
-    list.append(load, p.data)
-    let total = list.len(load)
+    let header_len = if not has_header
+        0
+    else if p.has_time_stamp
+        ISO_TIME_STAMP_LEN + ISO_SDU_HEADER_LEN
+    else
+        ISO_SDU_HEADER_LEN
+    let total = header_len + list.len(p.data)
     if total > ISO_DATA_TOTAL_LENGTH_MAX
         return None
     let flags = (p.connection_handle >>> 8) | (p.pb_flag << 4) | ((if p.has_time_stamp then 1 else 0) << 6)
-    var out: [u8] = [(p.connection_handle & 0xFF) as u8,
-        flags as u8,
-        (total & 0xFF) as u8,
-        ((total >>> 8) & 0x3F) as u8]
-    list.append(out, load)
+    var out = hci_buf.buf(ISO_HEADER_LEN + total)
+    hci_buf.put8(var out, p.connection_handle)
+    hci_buf.put8(var out, flags)
+    hci_buf.put8(var out, total)
+    hci_buf.put8(var out, (total >>> 8) & 0x3F)
+    if has_header
+        if p.has_time_stamp
+            hci_buf.put32(var out, p.time_stamp)
+        hci_buf.put16(var out, p.packet_sequence_number)
+        hci_buf.put16(var out, p.iso_sdu_length | (p.packet_status << 14))
+    hci_buf.put_bytes(var out, p.data)
     Some(out)
 
 // The same packet with its HCI packet indicator, ready for the transport.
@@ -1445,15 +1471,16 @@ fn le_periodic_sync_established(evt: [u8]) -> ?PeriodicSyncEstablished
         return None
     if list.len(evt) < 18 or le_meta_subevent(evt) != LE_SUBEVENT_PERIODIC_ADVERTISING_SYNC_ESTABLISHED
         return None
-    Some(PeriodicSyncEstablished {
-        status: evt[3] as Int,
-        sync_handle: le16_at(evt, 4) & 0x0FFF,
-        advertising_sid: evt[6] as Int,
-        advertiser_address_type: evt[7] as Int,
-        advertiser_address: evt[8:14],
-        advertiser_phy: evt[14] as Int,
-        periodic_interval: le16_at(evt, 15),
-        advertiser_clock_accuracy: evt[17] as Int })
+    system
+        Some(PeriodicSyncEstablished {
+            status: evt[3] as Int,
+            sync_handle: le16_at(evt, 4) & 0x0FFF,
+            advertising_sid: evt[6] as Int,
+            advertiser_address_type: evt[7] as Int,
+            advertiser_address: hci_buf.slice(evt, 8, 14),
+            advertiser_phy: evt[14] as Int,
+            periodic_interval: le16_at(evt, 15),
+            advertiser_clock_accuracy: evt[17] as Int })
 
 // ── LE Periodic Advertising Sync Lost event, Section 7.7.65.16 ──────
 //
@@ -1461,7 +1488,8 @@ fn le_periodic_sync_established(evt: [u8]) -> ?PeriodicSyncEstablished
 
 // The parameters of an LE Periodic Advertising Sync Lost event ([Vol 4] Part E, Section 7.7.65.16): the 12-bit `sync_handle` of the
 // train that was lost.
-pub struct PeriodicSyncLost
+pub @value
+struct PeriodicSyncLost
     sync_handle: Int
 
 // The parameters of an LE Periodic Advertising Sync Lost event, given without its HCI packet indicator, or None for any other event
@@ -1507,13 +1535,14 @@ fn le_periodic_advertising_report(evt: [u8]) -> ?PeriodicAdvertisingReport
     let n = evt[9] as Int
     if PERIODIC_REPORT_HEADER + n > list.len(evt)
         return None
-    Some(PeriodicAdvertisingReport {
-        sync_handle: le16_at(evt, 3) & 0x0FFF,
-        tx_power: evt[5] as Int,
-        rssi: evt[6] as Int,
-        cte_type: evt[7] as Int,
-        data_status: evt[8] as Int,
-        data: evt[PERIODIC_REPORT_HEADER:PERIODIC_REPORT_HEADER + n] })
+    system
+        Some(PeriodicAdvertisingReport {
+            sync_handle: le16_at(evt, 3) & 0x0FFF,
+            tx_power: evt[5] as Int,
+            rssi: evt[6] as Int,
+            cte_type: evt[7] as Int,
+            data_status: evt[8] as Int,
+            data: hci_buf.slice(evt, PERIODIC_REPORT_HEADER, PERIODIC_REPORT_HEADER + n) })
 
 // ── LE Periodic Advertising Sync Transfer Received event,
 //    Section 7.7.65.24 ──────────────────────────────────────────────
@@ -1547,17 +1576,18 @@ fn le_periodic_sync_transfer_received(evt: [u8]) -> ?PeriodicSyncTransferReceive
         return None
     if list.len(evt) < 22 or le_meta_subevent(evt) != LE_SUBEVENT_PERIODIC_ADVERTISING_SYNC_TRANSFER_RECEIVED
         return None
-    Some(PeriodicSyncTransferReceived {
-        status: evt[3] as Int,
-        connection_handle: le16_at(evt, 4) & 0x0FFF,
-        service_data: le16_at(evt, 6),
-        sync_handle: le16_at(evt, 8) & 0x0FFF,
-        advertising_sid: evt[10] as Int,
-        advertiser_address_type: evt[11] as Int,
-        advertiser_address: evt[12:18],
-        advertiser_phy: evt[18] as Int,
-        periodic_interval: le16_at(evt, 19),
-        advertiser_clock_accuracy: evt[21] as Int })
+    system
+        Some(PeriodicSyncTransferReceived {
+            status: evt[3] as Int,
+            connection_handle: le16_at(evt, 4) & 0x0FFF,
+            service_data: le16_at(evt, 6),
+            sync_handle: le16_at(evt, 8) & 0x0FFF,
+            advertising_sid: evt[10] as Int,
+            advertiser_address_type: evt[11] as Int,
+            advertiser_address: hci_buf.slice(evt, 12, 18),
+            advertiser_phy: evt[18] as Int,
+            periodic_interval: le16_at(evt, 19),
+            advertiser_clock_accuracy: evt[21] as Int })
 
 // ── LE Periodic Advertising Subevent Data Request, Section 7.7.65.36 ─
 //
@@ -1576,7 +1606,8 @@ pub const LE_SUBEVENT_PERIODIC_ADVERTISING_SUBEVENT_DATA_REQUEST = 0x27
 
 // The parameters of an LE Periodic Advertising Subevent Data Request event: the `advertising_handle` and the `subevent_start` and
 // `subevent_data_count` of the subevents the Controller asks data for.
-pub struct PawrSubeventRequest
+pub @value
+struct PawrSubeventRequest
     advertising_handle: Int
     subevent_start: Int
     subevent_data_count: Int
@@ -1651,24 +1682,27 @@ fn le_periodic_advertising_response_report(evt: [u8]) -> ?PawrResponseReport
     if list.len(evt) < 7 or le_meta_subevent(evt) != LE_SUBEVENT_PERIODIC_ADVERTISING_RESPONSE_REPORT
         return None
     let n = evt[6] as Int
-    var out: [PawrResponse] = []
-    var at = 7
-    for _ in 0..n
-        if at + PAWR_RESPONSE_HEADER > list.len(evt)
-            return None
-        let length = evt[at + 5] as Int
-        if at + PAWR_RESPONSE_HEADER + length > list.len(evt)
-            return None
-        list.push(out, PawrResponse {
-            tx_power: evt[at] as Int,
-            rssi: evt[at + 1] as Int,
-            cte_type: evt[at + 2] as Int,
-            response_slot: evt[at + 3] as Int,
-            data_status: evt[at + 4] as Int,
-            data: evt[at + PAWR_RESPONSE_HEADER:at + PAWR_RESPONSE_HEADER + length] })
-        at = at + PAWR_RESPONSE_HEADER + length
-    Some(PawrResponseReport {
-        advertising_handle: evt[3] as Int,
-        subevent: evt[4] as Int,
-        tx_status: evt[5] as Int,
-        responses: out })
+    // The responses are records with byte payloads, so they are boxed: the list and each record are explicit
+    // allocations, bounded by the 255 responses a one-octet Num_Responses counts.
+    system
+        var out: [PawrResponse] = list.with_capacity(n)
+        var at = 7
+        for _ in 0..n
+            if at + PAWR_RESPONSE_HEADER > list.len(evt)
+                return None
+            let length = evt[at + 5] as Int
+            if at + PAWR_RESPONSE_HEADER + length > list.len(evt)
+                return None
+            let _ = list.try_push(out, PawrResponse {
+                tx_power: evt[at] as Int,
+                rssi: evt[at + 1] as Int,
+                cte_type: evt[at + 2] as Int,
+                response_slot: evt[at + 3] as Int,
+                data_status: evt[at + 4] as Int,
+                data: hci_buf.slice(evt, at + PAWR_RESPONSE_HEADER, at + PAWR_RESPONSE_HEADER + length) })
+            at = at + PAWR_RESPONSE_HEADER + length
+        Some(PawrResponseReport {
+            advertising_handle: evt[3] as Int,
+            subevent: evt[4] as Int,
+            tx_status: evt[5] as Int,
+            responses: out })

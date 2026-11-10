@@ -13,6 +13,7 @@ depends on the standard library only.
 | `hci_frame` | OGF and event-code constants, `pack_opcode`, the ACL handle and flag fields, the `HciCmd`, `HciEvt` and `HciAcl` frames, `HciCmdMsg` and `HciEvtMsg` with their encoders and decoders |
 | `hci_codec` | the H4-framed command builders (`cmd_hci_reset`, `cmd_le_set_advertising_data`, ...), the readers of events and ISO and ACL data packets, and `build_iso_data_packet` |
 | `hci_cs` | the eighteen commands of Channel Sounding as builders over a fixed buffer (`HciCsCmd`), the nine events as readers into records, the capability record, the data of a step of each mode and role (`HciCsStep`), and the result of one procedure joined from its events (`HciCsProcResult`); Core Vol 4 Part E, sections 7.7.65.39 to 7.7.65.46, 7.8.130 to 7.8.143, 7.8.157 and 7.8.158 |
+| `hci_buf` | the writers the builders share: a buffer sized once (`buf`), `put8` to `put64` and `put12` for a Connection_Handle, `put_bytes`, `put_range` and `slice` |
 | `hci_h4` | the H4 packet-type byte, `frame_h4`, and `h4_packet_length`, which tells a deframer how many bytes the next packet occupies |
 | `bd_addr` | `BdAddr`, `BdAddrKind`, `classify_random` and `format_bd_addr` |
 | `uuid` | the Bluetooth Base UUID, 16-bit and 32-bit expansion to 128 bits, comparison without allocating, and the little-endian wire form |
@@ -34,6 +35,10 @@ fn reset_frame_is_whole() -> Bool
     let w = hci_codec.cmd_hci_reset()
     hci_h4.h4_packet_length(w) == list.len(w)
 ```
+
+## Memory
+
+Every module is written for the embedded tier and is checked against it in full.  A builder (`build_*`, `cmd_*`, `encode_*`, `frame_h4`, the UUID expansions) allocates one list, sized from the layout of the packet, and returns it; a command parameter block is at most 255 octets, so the largest packet a builder makes is 258 octets with its header.  The record readers of events whose fields are all numbers return `@value` structs and allocate nothing.  A reader whose record carries a payload (an advertising report, an ACL or ISO data packet, a connection complete event, the BIG events, the periodic advertising events, `decode_hci_cmd_msg`) builds a boxed record, and a list of them is a list of boxes; each such reader builds its result in a `system` block, which marks the allocation.  `format_bd_addr` and `hex_byte` build text and are for a log line.  The builders of `hci_cs` fill a fixed buffer and allocate nothing.
 
 The Host (`orbit/ble`) and the Controller both depend on this package, so
 the two sides share one definition of the wire.  The commands and events

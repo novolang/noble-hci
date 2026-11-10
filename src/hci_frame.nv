@@ -13,6 +13,8 @@
 // header structs with their `frame` compositions, and `HciCmdMsg` and `HciEvtMsg`, the typed form a transport hands
 // to a Host.
 
+use hci_buf
+
 // Opcode Group Field of the Link Control commands, 0x01 ([Vol 4] Part E, Section 7.1).
 pub const OGF_LINK_CONTROL = 0x01
 
@@ -175,20 +177,22 @@ pub struct HciEvtMsg
 // The H4 type byte is not added; `hci_h4.frame_h4` does that.  The parameters must not exceed 255 octets.
 pub @tier(embedded)
 fn encode_hci_cmd_msg(cmd: HciCmdMsg) -> [u8]
-    let opcode_lo = (cmd.opcode & 0xFF) as u8
-    let opcode_hi = ((cmd.opcode >>> 8) & 0xFF) as u8
-    var header: [u8] = [opcode_lo, opcode_hi, list.len(cmd.params) as u8]
-    list.append(header, cmd.params)
-    header
+    var out = hci_buf.buf(3 + list.len(cmd.params))
+    hci_buf.put16(var out, cmd.opcode)
+    hci_buf.put8(var out, list.len(cmd.params))
+    hci_buf.put_bytes(var out, cmd.params)
+    out
 
 // The wire form of `evt`: the event code (1 octet), the parameter length (1 octet) and the parameters.
 //
 // The H4 type byte is not added.  The parameters must not exceed 255 octets.
 pub @tier(embedded)
 fn encode_hci_evt_msg(evt: HciEvtMsg) -> [u8]
-    var header: [u8] = [evt.event_code as u8, list.len(evt.params) as u8]
-    list.append(header, evt.params)
-    header
+    var out = hci_buf.buf(2 + list.len(evt.params))
+    hci_buf.put8(var out, evt.event_code)
+    hci_buf.put8(var out, list.len(evt.params))
+    hci_buf.put_bytes(var out, evt.params)
+    out
 
 // The command held in `bytes`, an HCI Command packet without its H4 type byte.
 //
@@ -197,7 +201,9 @@ fn encode_hci_evt_msg(evt: HciEvtMsg) -> [u8]
 pub @tier(embedded)
 fn decode_hci_cmd_msg(bytes: [u8]) -> HciCmdMsg
     let opcode = bytes[0] as Int | (bytes[1] as Int << 8)
-    HciCmdMsg { opcode: opcode, params: list.drop(bytes, 3) }
+    // The message holds a list, so it is a boxed record: the one explicit allocation of the decoder.
+    system
+        HciCmdMsg { opcode: opcode, params: hci_buf.slice(bytes, 3, list.len(bytes)) }
 
 // The event held in `bytes`, an HCI Event packet without its H4 type byte.
 //
@@ -205,4 +211,5 @@ fn decode_hci_cmd_msg(bytes: [u8]) -> HciCmdMsg
 // against the number of octets present.
 pub @tier(embedded)
 fn decode_hci_evt_msg(bytes: [u8]) -> HciEvtMsg
-    HciEvtMsg { event_code: bytes[0] as Int, params: list.drop(bytes, 2) }
+    system
+        HciEvtMsg { event_code: bytes[0] as Int, params: hci_buf.slice(bytes, 2, list.len(bytes)) }

@@ -19,16 +19,24 @@
 // expands a short UUID, compares two 128-bit UUIDs, and compares a short UUID with a 128-bit one without building
 // the expansion.
 
+use hci_buf
+
+// Append the first 12 octets of the Base UUID to `out`: the part below the octets a short UUID overlays.
+@tier(embedded)
+fn put_base(var out: [u8])
+    hci_buf.put32(var out, 0x5F9B34FB)
+    hci_buf.put32(var out, 0x80000080)
+    hci_buf.put32(var out, 0x00001000)
+
 // The Bluetooth Base UUID 00000000-0000-1000-8000-00805F9B34FB as 16 octets, least significant octet first as on the wire.
 //
 // Octets 12 to 15 are zero: they are where a 16-bit or 32-bit UUID is overlaid ([Vol 3] Part B, Section 2.5.1).
 pub @tier(embedded)
 fn base_uuid_bytes() -> [u8]
-    [
-        0xFB, 0x34, 0x9B, 0x5F,
-        0x80, 0x00, 0x00, 0x80,
-        0x00, 0x10, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00]
+    var out = hci_buf.buf(16)
+    put_base(var out)
+    hci_buf.put32(var out, 0)
+    out
 
 // The 128-bit form of the 16-bit UUID `uuid16`, 16 octets, least significant octet first.
 //
@@ -36,13 +44,11 @@ fn base_uuid_bytes() -> [u8]
 pub @satisfies("REQ-BLE-ATT-UUID-002")
 @tier(embedded)
 fn uuid16_to_128(uuid16: Int) -> [u8]
-    [
-        0xFB, 0x34, 0x9B, 0x5F,
-        0x80, 0x00, 0x00, 0x80,
-        0x00, 0x10, 0x00, 0x00,
-        (uuid16 & 0xFF) as u8,
-        ((uuid16 >>> 8) & 0xFF) as u8,
-        0x00, 0x00]
+    var out = hci_buf.buf(16)
+    put_base(var out)
+    hci_buf.put16(var out, uuid16)
+    hci_buf.put16(var out, 0)
+    out
 
 // The 128-bit form of the 32-bit UUID `uuid32`, 16 octets, least significant octet first.
 //
@@ -50,14 +56,10 @@ fn uuid16_to_128(uuid16: Int) -> [u8]
 pub @satisfies("REQ-BLE-ATT-UUID-002")
 @tier(embedded)
 fn uuid32_to_128(uuid32: Int) -> [u8]
-    [
-        0xFB, 0x34, 0x9B, 0x5F,
-        0x80, 0x00, 0x00, 0x80,
-        0x00, 0x10, 0x00, 0x00,
-        (uuid32 & 0xFF) as u8,
-        ((uuid32 >>> 8) & 0xFF) as u8,
-        ((uuid32 >>> 16) & 0xFF) as u8,
-        ((uuid32 >>> 24) & 0xFF) as u8]
+    var out = hci_buf.buf(16)
+    put_base(var out)
+    hci_buf.put32(var out, uuid32)
+    out
 
 // Whether two 128-bit UUIDs, each 16 octets, are equal octet for octet.
 //
@@ -139,9 +141,9 @@ fn base_byte_at(i: Int) -> Int
 pub @satisfies("REQ-BLE-ATT-UUID-003")
 @tier(embedded)
 fn uuid16_to_le_bytes(uuid16: Int) -> [u8]
-    [
-        (uuid16 & 0xFF) as u8,
-        ((uuid16 >>> 8) & 0xFF) as u8]
+    var out = hci_buf.buf(2)
+    hci_buf.put16(var out, uuid16)
+    out
 
 // The 16-bit UUID held in the first two octets of `b`, least significant first.
 //
