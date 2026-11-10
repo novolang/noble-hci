@@ -143,13 +143,21 @@ fn opcode_le_cs_set_default_security_requirements() -> Int
 
 // LE Meta subevent codes of the nine events ([Vol 4] Part E, Sections 7.7.65.39 to 7.7.65.46).
 pub const SUB_CS_READ_REMOTE_SUPPORTED_CAPABILITIES_COMPLETE = 0x2C
+// LE Meta subevent code of LE CS Read Remote FAE Table Complete.
 pub const SUB_CS_READ_REMOTE_FAE_TABLE_COMPLETE = 0x2D
+// LE Meta subevent code of LE CS Security Enable Complete.
 pub const SUB_CS_SECURITY_ENABLE_COMPLETE = 0x2E
+// LE Meta subevent code of LE CS Config Complete.
 pub const SUB_CS_CONFIG_COMPLETE = 0x2F
+// LE Meta subevent code of LE CS Procedure Enable Complete.
 pub const SUB_CS_PROCEDURE_ENABLE_COMPLETE = 0x30
+// LE Meta subevent code of LE CS Subevent Result.
 pub const SUB_CS_SUBEVENT_RESULT = 0x31
+// LE Meta subevent code of LE CS Subevent Result Continue.
 pub const SUB_CS_SUBEVENT_RESULT_CONTINUE = 0x32
+// LE Meta subevent code of LE CS Test End Complete.
 pub const SUB_CS_TEST_END_COMPLETE = 0x33
+// LE Meta subevent code of LE CS Read Remote Supported Capabilities Complete [v2].
 pub const SUB_CS_READ_REMOTE_SUPPORTED_CAPABILITIES_COMPLETE_V2 = 0x38
 
 // The bits 43 to 50 of LE Set Event Mask, the eight events of the [v1] set ([Vol 4] Part E, Section 7.8.1).
@@ -164,15 +172,19 @@ pub const FEATURE_CS_HOST_SUPPORT = 47
 
 // ── Values ──────────────────────────────────────────────────────────
 
+// The role value of the initiator, which transmits first in every step.
 pub const CS_ROLE_INITIATOR = 0
+// The role value of the reflector, which answers in every step.
 pub const CS_ROLE_REFLECTOR = 1
 
 // Role_Enable bits of LE CS Set Default Settings.
 pub const CS_ROLE_ENABLE_INITIATOR = 0x01
+// The Role_Enable bit that allows the reflector role.
 pub const CS_ROLE_ENABLE_REFLECTOR = 0x02
 
 // Create_Context of LE CS Create Config: the configuration is written in the local Controller only, or in both Controllers.
 pub const CS_CREATE_LOCAL = 0x00
+// Create_Context value: write the configuration in both Controllers.
 pub const CS_CREATE_BOTH = 0x01
 
 // Sub_Mode_Type 0xFF: no submode.
@@ -180,50 +192,73 @@ pub const CS_SUB_MODE_UNUSED = 0xFF
 
 // CS_SYNC_PHY of Create Config and LE CS Test.
 pub const CS_SYNC_PHY_1M = 0x01
+// CS_SYNC_PHY value: LE 2M.
 pub const CS_SYNC_PHY_2M = 0x02
+// CS_SYNC_PHY value: LE 2M 2BT.
 pub const CS_SYNC_PHY_2M_2BT = 0x03
 
 // RTT_Type: access address only, and the sounding and random sequences.
 pub const CS_RTT_AA_ONLY = 0x00
+// RTT_Type value: a sounding sequence of 32 bits.
 pub const CS_RTT_SOUNDING_32 = 0x01
+// RTT_Type value: a sounding sequence of 96 bits.
 pub const CS_RTT_SOUNDING_96 = 0x02
+// RTT_Type value: a random sequence of 32 bits.
 pub const CS_RTT_RANDOM_32 = 0x03
+// RTT_Type value: a random sequence of 64 bits.
 pub const CS_RTT_RANDOM_64 = 0x04
+// RTT_Type value: a random sequence of 96 bits.
 pub const CS_RTT_RANDOM_96 = 0x05
+// RTT_Type value: a random sequence of 128 bits.
 pub const CS_RTT_RANDOM_128 = 0x06
 
 // Channel_Selection_Type.
 pub const CS_CHSEL_3B = 0x00
+// Channel_Selection_Type value: channel selection algorithm #3c.
 pub const CS_CHSEL_3C = 0x01
 
 // Max_TX_Power of LE CS Set Default Settings and CS_SYNC_Antenna_Selection values.
 pub const CS_ANTENNA_NO_RECOMMENDATION = 0xFF
+// CS_SYNC_Antenna_Selection value 0xFD: each antenna identifier repeated in turn (1, 1, ..., N, N).
 pub const CS_ANTENNA_REPETITIVE = 0xFD
+// CS_SYNC_Antenna_Selection value 0xFE: the antenna identifiers 1 to N in order, repeated.
 pub const CS_ANTENNA_ORDERED = 0xFE
 
 // Tx_Power_Delta 0x80: the Host has no recommendation.  SNR control 0xFF: not applied.
 pub const CS_TX_POWER_DELTA_NONE = 0x80
+// SNR control value 0xFF: not applied.
 pub const CS_SNR_NONE = 0xFF
 
 // The done statuses of a result event, bits 0 to 3 of Procedure_Done_Status and of Subevent_Done_Status.
 pub const CS_DONE_COMPLETE = 0x0
+// Done status: the results so far are partial and more follow.
 pub const CS_DONE_PARTIAL = 0x1
+// Done status: the procedure or the subevent was aborted.
 pub const CS_DONE_ABORTED = 0xF
 
 // The value of an unavailable field: a time difference (16 bits), a frequency offset (16 bits), a phase correction term of a packet
 // (32 bits), and a reference power level or an RSSI (8 bits).
 pub const CS_TIME_DIFF_NA = 0x8000
+// The value of a frequency offset that is not available (16 bits).
 pub const CS_FREQ_NA = 0xC000
+// The value of a phase correction term that is not available (32 bits).
 pub const CS_PCT_NA = 0xFFFFFFFF
+// The value of a reference power level or an RSSI that is not available (8 bits).
 pub const CS_POWER_NA = 0x7F
 
 // The sizes of the records.
 pub const CS_CMD_OCTETS = 256
+// The most steps one result event holds.
 pub const CS_STEPS_PER_EVENT = 80
+// The most steps a procedure result joined from its events holds.
 pub const CS_STEPS_PER_PROCEDURE = 256
+// The most subevents a procedure result joined from its events holds.
 pub const CS_SUBEVENTS_PER_PROCEDURE = 32
+// The most tone slots in a step: four antenna paths and the extension slot.
 pub const CS_TONE_SLOTS = 5
+// The octets of a channel map.
 pub const CS_CHANNEL_MAP_OCTETS = 10
+// The entries of a frequency actuation error table, one for each of 72 channels.
 pub const CS_FAE_ENTRIES = 72
 
 // ── A command ───────────────────────────────────────────────────────
@@ -335,9 +370,13 @@ fn cs_caps_none() -> HciCsCaps
 
 // The Subfeatures_Supported bits.
 pub const CS_SUB_NO_FAE = 0x0002
+// Subfeatures_Supported bit: channel selection algorithm #3c.
 pub const CS_SUB_CHANNEL_SELECTION_3C = 0x0004
+// Subfeatures_Supported bit: phase-based ranging from a sounding sequence.
 pub const CS_SUB_SOUNDING_PCT = 0x0008
+// Subfeatures_Supported bit: IPT in the CS reflector.
 pub const CS_SUB_IPT = 0x0010
+// Subfeatures_Supported bit: RTT accuracy requirements for LE 2M and LE 2M 2BT set apart from those of LE 1M.
 pub const CS_SUB_RTT_PER_PHY = 0x0020
 
 // Whether the record names the initiator role, and the reflector role.
@@ -346,6 +385,7 @@ pub @tier(embedded)
 fn cs_caps_initiator(c: HciCsCaps) -> Bool
     (c.roles & 1) != 0
 
+// Whether the record names the reflector role.
 pub @tier(embedded)
 @no_alloc
 fn cs_caps_reflector(c: HciCsCaps) -> Bool
@@ -353,6 +393,7 @@ fn cs_caps_reflector(c: HciCsCaps) -> Bool
 
 // The octets the record takes in a [v1] and in a [v2] command or event.
 pub const CS_CAPS_V1_OCTETS = 28
+// The octets the capability record takes in a [v2] command or event.
 pub const CS_CAPS_V2_OCTETS = 34
 
 @tier(embedded)
@@ -787,9 +828,13 @@ fn cs_test_end() -> HciCsCmd
 // The bits of CS_Security_Requirements (7.8.157, 7.8.158): 0 tone, 1 150 ns RTT accuracy, 2 10 ns RTT accuracy, 3 RTT with a sequence, 4 the Normalized
 // Attack Detector Metric.
 pub const CS_SEC_TONE = 0x01
+// Security requirement bit 1: round-trip time accuracy of 150 ns.
 pub const CS_SEC_RTT_150NS = 0x02
+// Security requirement bit 2: round-trip time accuracy of 10 ns.
 pub const CS_SEC_RTT_10NS = 0x04
+// Security requirement bit 3: round-trip time with a sequence.
 pub const CS_SEC_SEQUENCE = 0x08
+// Security requirement bit 4: the Normalized Attack Detector Metric.
 pub const CS_SEC_NADM = 0x10
 
 // LE CS Set Security Requirements: Connection_Handle and the 8 octets of the requirements.
@@ -862,10 +907,12 @@ fn cs_fae_zero() -> Vec[Int; 72]
         let _a = t.push(0)
     t
 
+// A Read Remote FAE Table Complete record with every field zero.
 pub @tier(embedded)
 fn cs_remote_fae_new() -> HciCsRemoteFae
     HciCsRemoteFae { status: 0, handle: 0, table: cs_fae_zero() }
 
+// Read the event LE CS Read Remote FAE Table Complete into `out`.  False for any other event or a length that is not the event's.
 pub @tier(embedded)
 fn cs_read_remote_fae(evt: [u8], var out: HciCsRemoteFae) -> Bool
     if cs_subevent(evt) != SUB_CS_READ_REMOTE_FAE_TABLE_COMPLETE or list.len(evt) != 78
@@ -882,6 +929,7 @@ struct HciCsSecurityComplete
     status: Int
     handle: Int
 
+// Read the event LE CS Security Enable Complete into `out`.  False for any other event or a length that is not the event's.
 pub @tier(embedded)
 fn cs_read_security_enable_complete(evt: [u8], var out: HciCsSecurityComplete) -> Bool
     if cs_subevent(evt) != SUB_CS_SECURITY_ENABLE_COMPLETE or list.len(evt) != 6
@@ -902,10 +950,12 @@ struct HciCsConfigComplete
     t_fcs_us: Int
     t_pm_us: Int
 
+// A Config Complete record with every field zero.
 pub @tier(embedded)
 fn cs_config_complete_new() -> HciCsConfigComplete
     HciCsConfigComplete { status: 0, action: 0, cfg: cs_config_new(0, 0, 0), t_ip1_us: 0, t_ip2_us: 0, t_fcs_us: 0, t_pm_us: 0 }
 
+// Read the event LE CS Config Complete into `out`.  False for any other event or a length that is not the event's.
 pub @tier(embedded)
 fn cs_read_config_complete(evt: [u8], var out: HciCsConfigComplete) -> Bool
     if cs_subevent(evt) != SUB_CS_CONFIG_COMPLETE or list.len(evt) != 36
@@ -956,12 +1006,14 @@ struct HciCsProcedureEnableComplete
     procedure_count: Int
     max_procedure_len: Int
 
+// A Procedure Enable Complete record with every field zero.
 pub @tier(embedded)
 fn cs_procedure_enable_complete_new() -> HciCsProcedureEnableComplete
     HciCsProcedureEnableComplete { status: 0, handle: 0, config_id: 0, state: 0, antenna_config: 0, selected_tx_power: 0, subevent_len: 0,
                                 subevents_per_event: 0, subevent_interval: 0, event_interval: 0, procedure_interval: 0, procedure_count: 0,
                                 max_procedure_len: 0 }
 
+// Read the event LE CS Procedure Enable Complete into `out`.  False for any other event or a length that is not the event's.
 pub @tier(embedded)
 fn cs_read_procedure_enable_complete(evt: [u8], var out: HciCsProcedureEnableComplete) -> Bool
     if cs_subevent(evt) != SUB_CS_PROCEDURE_ENABLE_COMPLETE or list.len(evt) != 24
@@ -1025,6 +1077,7 @@ struct HciCsStep
     pct: Vec[Int; 5]
     tq: Vec[Int; 5]
 
+// A step record with every field at the value of an empty step: no channel, no data, and the unavailable values in the measured fields.
 pub @tier(embedded)
 fn cs_step_new() -> HciCsStep
     var s = HciCsStep { mode: 0, channel: -1, aborted: false, valid: false, data_len: 0, quality: 0, nadm: 0xFF, rssi: CS_POWER_NA, antenna: 0,
@@ -1045,6 +1098,7 @@ fn cs_pct_i(pct: Int) -> Int
     else
         v
 
+// The quadrature part of a phase correction term, as a signed 12-bit value.
 pub @tier(embedded)
 @no_alloc
 fn cs_pct_q(pct: Int) -> Int
@@ -1060,6 +1114,7 @@ pub @tier(embedded)
 fn cs_tq_quality(tq: Int) -> Int
     tq & 0xF
 
+// The extension slot field of a tone quality indicator (bits 4 to 7).
 pub @tier(embedded)
 @no_alloc
 fn cs_tq_extension(tq: Int) -> Int
@@ -1241,6 +1296,7 @@ struct HciCsResultEvent
     n_steps: Int
     steps: Vec[HciCsStep; 80]
 
+// A result event record with no steps and the unavailable values in its measured fields.
 pub @tier(embedded)
 fn cs_result_event_new() -> HciCsResultEvent
     var r = HciCsResultEvent { cont: false, handle: 0, config_id: 0, start_acl_event: 0, procedure_counter: 0, frequency_compensation: CS_FREQ_NA,
@@ -1340,11 +1396,13 @@ struct HciCsProcResult
     subs: Vec[HciCsSubHead; 32]
     steps: Vec[HciCsStep; 256]
 
+// A subevent head record with every field at its empty value.
 pub @tier(embedded)
 fn cs_sub_head_new() -> HciCsSubHead
     HciCsSubHead { start_acl_event: 0, frequency_compensation: CS_FREQ_NA, reference_power: CS_POWER_NA, procedure_done: 0, done: 0, abort_procedure: 0,
                 abort_subevent: 0, first: 0, count: 0 }
 
+// A procedure result with no subevents and no steps, ready for `cs_proc_add`.
 pub @tier(embedded)
 fn cs_proc_result_new() -> HciCsProcResult
     var r = HciCsProcResult { handle: 0, config_id: 0, procedure_counter: 0, num_antenna_paths: 0, complete: false, aborted: false, overflow: false,

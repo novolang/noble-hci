@@ -1,6 +1,6 @@
 [package]
 name        = "noble-hci"
-version     = "0.1.0"
+version     = "0.1.1"
 description = "The Bluetooth HCI seam both the Host and the Controller read: opcode and event constants, one builder per command, one reader per field, the H4 frame codec, and the BdAddr and Uuid types.  Stateless: no state, no effects, no limits."
 license     = "Apache-2.0"
 stability   = "experimental"

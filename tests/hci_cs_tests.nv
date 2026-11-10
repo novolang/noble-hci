@@ -732,3 +732,46 @@ fn test_the_fae_index_is_the_inverse_of_the_channel_of_an_entry()
     test.assert_eq(hci_cs.cs_fae_index(77), -1)
     test.assert_eq(hci_cs.cs_s8(0xD8), -40)
     test.assert_eq(hci_cs.cs_s8(0x14), 20)
+
+@test
+fn test_a_remote_capabilities_reader_refuses_the_events_of_other_subevents()
+    // The FAE table event is no capabilities event, whatever its length.
+    var rc = hci_cs.HciCsRemoteCapabilities { status: 0, handle: 0, caps: hci_cs.cs_caps_none() }
+    test.assert_eq(hci_cs.cs_read_remote_capabilities(meta(0x2D, rep(0, 30)), var rc), false)
+    test.assert_eq(hci_cs.cs_read_remote_capabilities(meta(0x2D, rep(0, 35)), var rc), false)
+
+@test
+fn test_a_step_of_another_length_than_its_mode_takes_is_refused()
+    var s = hci_cs.cs_step_new()
+    // Mode 1 takes 6 octets and, with the terms, 14.
+    test.assert_eq(hci_cs.cs_step_data_read(u8s(rep(0, 7)), 0, 7, 1, 1, var s), false)
+    // Mode 2 takes 1 octet and four for each tone slot, at most five slots: 6 octets and 25 octets are not forms of it.
+    test.assert_eq(hci_cs.cs_step_data_read(u8s(rep(0, 6)), 0, 6, 2, 1, var s), false)
+    test.assert_eq(hci_cs.cs_step_data_read(u8s(rep(0, 25)), 0, 25, 2, 1, var s), false)
+    // A mode that Core does not define holds no data.
+    test.assert_eq(hci_cs.cs_step_data_read(u8s(rep(0, 3)), 0, 3, 4, 1, var s), false)
+
+@test
+fn test_a_procedure_is_cut_at_its_thirty_two_subevents()
+    var res = hci_cs.cs_proc_result_new()
+    var ev = hci_cs.cs_result_event_new()
+    test.assert_eq(hci_cs.cs_read_result(result_event(1, 0, 0, 1, 1, [0, 4, 3, 0, 0xD8, 1]), var ev), true)
+    for _ in 0..32
+        test.assert_eq(hci_cs.cs_proc_add(var res, ev), 0)
+    test.assert_eq(res.n_sub, 32)
+    test.assert_eq(hci_cs.cs_proc_add(var res, ev), 3)
+    test.assert_eq(res.overflow, true)
+    test.assert_eq(res.n_sub, 32)
+    test.assert_eq(res.n_steps, 32)
+
+@test
+fn test_a_new_command_and_a_new_subevent_head_are_empty()
+    let c = hci_cs.cs_cmd_new(0x2090)
+    test.assert_eq(c.opcode, 0x2090)
+    test.assert_eq(c.n, 0)
+    test.assert_eq(list.len(hci_cs.cs_cmd_params(c)), 0)
+    let h = hci_cs.cs_sub_head_new()
+    test.assert_eq(h.count, 0)
+    test.assert_eq(h.first, 0)
+    test.assert_eq(h.frequency_compensation, hci_cs.CS_FREQ_NA)
+    test.assert_eq(h.reference_power, hci_cs.CS_POWER_NA)
