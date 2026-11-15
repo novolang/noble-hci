@@ -4,6 +4,7 @@
 
 use std.test
 use hci_commands
+use hci_codec
 use hci_codec.{ le_meta_event, ACL_PB_CONTINUING, ACL_PB_FIRST_FLUSHABLE, ADV_REPORT_ADV_IND, ADV_REPORT_ADV_NONCONN_IND, ADV_REPORT_RSSI_NOT_AVAILABLE, ADV_REPORT_SCAN_RSP, CIS_ESTABLISHED_LENGTH, CIS_ESTABLISHED_V2_LENGTH, CONNECTION_ROLE_PERIPHERAL, ISO_PB_COMPLETE_SDU, ISO_PB_FIRST_FRAGMENT, ISO_PB_INTERMEDIATE_FRAGMENT, ISO_PB_LAST_FRAGMENT, ISO_PSF_LOST, ISO_PSF_POSSIBLY_INVALID, ISO_PSF_VALID, IsoDataPacket, LE_SUBEVENT_BIG_INFO_ADVERTISING_REPORT, LE_SUBEVENT_BIG_SYNC_ESTABLISHED, LE_SUBEVENT_BIG_SYNC_LOST, LE_SUBEVENT_CIS_ESTABLISHED, LE_SUBEVENT_CIS_ESTABLISHED_V2, LE_SUBEVENT_CIS_REQUEST, LE_SUBEVENT_CREATE_BIG_COMPLETE, LE_SUBEVENT_TERMINATE_BIG_COMPLETE, PAWR_TX_STATUS_FAILED, PAWR_TX_STATUS_SUCCESS, PERIODIC_DATA_COMPLETE, acl_data_packet, answered_opcode, answered_status, build_command, build_h4_acl, build_h4_command, build_h4_iso, build_iso_data_packet, cmd_hci_reset, cmd_le_set_advertising_enable, cmd_le_set_random_address, cmd_read_bd_addr, command_complete_opcode, command_complete_return_parameters, command_complete_status, command_status_opcode, command_status_status, connection_complete_event, disconnection_complete, encryption_change, event_code, event_param_len, is_command_complete, is_command_status, is_encryption_event, iso_connection_handle_return, iso_data_packet, iso_event_shape, iso_group_id_return, iso_link_quality, iso_test_counters, le_advertising_reports, le_big_info_advertising_report, le_big_sync_established, le_big_sync_lost, le_buffer_size, le_buffer_size_v2, le_cis_established, le_cis_request, le_connection_complete, le_connection_update_complete, le_create_big_complete, le_long_term_key_request, le_meta_subevent, le_periodic_advertising_report, le_periodic_advertising_response_report, le_periodic_advertising_subevent_data_request, le_periodic_sync_established, le_periodic_sync_lost, le_periodic_sync_transfer_received, le_read_iso_tx_sync, le_remote_connection_parameter_request, le_set_cig_parameters_return, le_terminate_big_complete, number_of_completed_packets }
 
 // ── Helpers the tests share ─────────────────────────────────────────
@@ -1034,3 +1035,25 @@ fn test_iso_data_packet_refusals()
         Some(p) =>
             test.assert_eq(p.pb_flag, ISO_PB_COMPLETE_SDU)
             test.assert_eq(list.len(p.data), 0)
+
+@test
+fn test_le_phy_update_complete_fields()
+    let evt: [u8] = [0x3E, 0x06, 0x0C, 0x00, 0x40, 0x00, 0x02, 0x02]
+    match hci_codec.le_phy_update_complete(evt)
+        None    => test.fail("the event decodes")
+        Some(u) =>
+            test.assert_eq(u.status, 0)
+            test.assert_eq(u.connection_handle, 0x0040)
+            test.assert_eq(u.tx_phy, 2)
+            test.assert_eq(u.rx_phy, 2)
+    match hci_codec.le_phy_update_complete([0x3E, 0x06, 0x0C, 0x1A, 0x41, 0x10, 0x01, 0x03])
+        None    => test.fail("a failed update decodes")
+        Some(u) =>
+            test.assert_eq(u.status, 0x1A)
+            test.assert_eq(u.connection_handle, 0x0041)
+            test.assert_eq(u.tx_phy, 1)
+            test.assert_eq(u.rx_phy, 3)
+    test.assert(hci_codec.le_phy_update_complete(evt[0:7]) == None)
+    test.assert(hci_codec.le_phy_update_complete([0x3E, 0x07, 0x0C, 0x00, 0x40, 0x00, 0x02, 0x02]) == None)
+    test.assert(hci_codec.le_phy_update_complete(connection_complete_event()) == None)
+    test.assert_eq(hci_codec.LE_SUBEVENT_PHY_UPDATE_COMPLETE, 0x0C)

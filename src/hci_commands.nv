@@ -1455,6 +1455,10 @@ pub const LE_EVENT_MASK_DEFAULT = 0x000000000000001F
 // Connection Parameters Request procedure.
 pub const LE_EVENT_MASK_REMOTE_CONNECTION_PARAMETER_REQUEST = 0x0000000000000020
 
+// Bit 11 of the LE_Event_Mask: the LE PHY Update Complete event ([Vol 4] Part E, Section 7.7.65.12), which the Controller sends when the
+// PHY of a connection changes, whoever asked for it.
+pub const LE_EVENT_MASK_PHY_UPDATE_COMPLETE = 0x0000000000000800
+
 // Bit 12 is the LE Extended Advertising Report event ([Vol 4] Part E, Section
 // 7.7.65.13), which a Controller sends in place of the LE Advertising Report while
 // the Host scans with LE Set Extended Scan Enable.  A Controller sends none while
@@ -2288,6 +2292,74 @@ fn build_connection_parameters(connection_handle: Int, interval_min: Int, interv
     hci_buf.put16(var out, timeout)
     hci_buf.put16(var out, min_ce_length)
     hci_buf.put16(var out, max_ce_length)
+    out
+
+// ── PHYs ────────────────────────────────────────────────────────────
+//
+// The masks of the commands name a PHY by a bit (bit 0 LE 1M, bit 1 LE 2M, bit 2 LE Coded); the events name it by a value
+// (`LE_PHY_1M`, `LE_PHY_2M`, `LE_PHY_CODED`).
+
+// The bit of LE 1M in the TX_PHYS and RX_PHYS of LE Set Default PHY and LE Set PHY ([Vol 4] Part E, Sections 7.8.48 and 7.8.49).
+pub const PHY_MASK_1M = 0x01
+
+// The bit of LE 2M in the same masks.
+pub const PHY_MASK_2M = 0x02
+
+// The bit of LE Coded in the same masks.
+pub const PHY_MASK_CODED = 0x04
+
+// The opcode of the LE Read PHY command, 0x2030 ([Vol 4] Part E, Section 7.8.47).
+pub @tier(embedded)
+@no_alloc
+fn opcode_le_read_phy() -> Int
+    // OGF=0x08, OCF=0x0030 → 0x2030.
+    (0x08 << 10) | 0x030
+
+// The opcode of the LE Set Default PHY command, 0x2031 (Section 7.8.48).
+pub @tier(embedded)
+@no_alloc
+fn opcode_le_set_default_phy() -> Int
+    // OGF=0x08, OCF=0x0031 → 0x2031.
+    (0x08 << 10) | 0x031
+
+// The opcode of the LE Set PHY command, 0x2032 (Section 7.8.49).
+pub @tier(embedded)
+@no_alloc
+fn opcode_le_set_phy() -> Int
+    // OGF=0x08, OCF=0x0032 → 0x2032.
+    (0x08 << 10) | 0x032
+
+// The 3 parameter octets of the LE Set Default PHY command: All_PHYs, TX_PHYS and RX_PHYS.  A mask of 0 is no preference for that direction
+// (bit 0 of All_PHYs for the transmitter, bit 1 for the receiver), and any other mask is the PHYs the Controller may use when a peer or
+// the Controller itself changes the PHY of a connection.
+pub @tier(embedded)
+fn build_le_set_default_phy(tx_mask: Int, rx_mask: Int) -> [u8]
+    var out = hci_buf.buf(3)
+    var all = 0
+    if tx_mask == 0
+        all = all | 0x01
+    if rx_mask == 0
+        all = all | 0x02
+    hci_buf.put8(var out, all)
+    hci_buf.put8(var out, tx_mask)
+    hci_buf.put8(var out, rx_mask)
+    out
+
+// The 7 parameter octets of the LE Set PHY command: Connection_Handle, All_PHYs (as `build_le_set_default_phy`), TX_PHYS, RX_PHYS and
+// PHY_options, which is 0 for no preference of a coding on LE Coded.
+pub @tier(embedded)
+fn build_le_set_phy(connection_handle: Int, tx_mask: Int, rx_mask: Int, options: Int) -> [u8]
+    var out = hci_buf.buf(7)
+    hci_buf.put12(var out, connection_handle)
+    var all = 0
+    if tx_mask == 0
+        all = all | 0x01
+    if rx_mask == 0
+        all = all | 0x02
+    hci_buf.put8(var out, all)
+    hci_buf.put8(var out, tx_mask)
+    hci_buf.put8(var out, rx_mask)
+    hci_buf.put16(var out, options)
     out
 
 // The 25 parameter octets of the LE Create Connection command: the

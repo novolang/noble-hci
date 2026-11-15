@@ -620,6 +620,34 @@ fn le_connection_update_complete(evt: [u8]) -> ?LeConnectionUpdateComplete
             peripheral_latency: le16_at(evt, 8),
             supervision_timeout: le16_at(evt, 10) })
 
+// ── LE PHY Update Complete event, [Vol 4] Part E, Section 7.7.65.12 ──
+//
+//   evt[0] = 0x3E, evt[1] = 6, evt[2] = 0x0C, then Status, Connection_Handle (2), TX_PHY, RX_PHY
+
+// Subevent_Code 0x0C of the LE PHY Update Complete event.
+pub const LE_SUBEVENT_PHY_UPDATE_COMPLETE = 0x0C
+
+// The parameters of an LE PHY Update Complete event.  `tx_phy` and `rx_phy` are 1 (LE 1M), 2 (LE 2M) or 3 (LE Coded).
+pub @value
+struct LePhyUpdateComplete
+    status: Int
+    connection_handle: Int
+    tx_phy: Int
+    rx_phy: Int
+
+// The parameters of an LE PHY Update Complete event, given without its HCI packet indicator, or None for any other event or one whose
+// length is not the event's 8 octets.
+pub @tier(embedded)
+fn le_phy_update_complete(evt: [u8]) -> ?LePhyUpdateComplete
+    if le_meta_subevent(evt) != LE_SUBEVENT_PHY_UPDATE_COMPLETE or list.len(evt) != 8 or (evt[1] as Int) != 6
+        None
+    else
+        Some(LePhyUpdateComplete {
+            status: evt[3] as Int,
+            connection_handle: le16_at(evt, 4) & 0x0FFF,
+            tx_phy: evt[6] as Int,
+            rx_phy: evt[7] as Int })
+
 // ── LE Long Term Key Request event, [Vol 4] Part E, Section 7.7.65.5 ─
 //
 //   evt[0] = 0x3E, evt[1] = 13, evt[2] = 0x05, then Connection_Handle
