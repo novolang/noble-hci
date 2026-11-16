@@ -4,7 +4,7 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
-## Unreleased
+## 0.1.2 — 2026-11-16
 
 The PHY commands and event of the Host: `opcode_le_read_phy`, `opcode_le_set_default_phy`, `opcode_le_set_phy`, `build_le_set_default_phy(tx_mask, rx_mask)` and `build_le_set_phy(handle, tx_mask, rx_mask, options)` (a mask of 0 sets the no-preference bit of All_PHYs), the bits `PHY_MASK_1M`, `PHY_MASK_2M` and `PHY_MASK_CODED`, `LE_EVENT_MASK_PHY_UPDATE_COMPLETE` (bit 11) and `hci_codec.le_phy_update_complete` with the record `LePhyUpdateComplete`.  Nothing that exists changed.
 

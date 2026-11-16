@@ -1162,6 +1162,7 @@ fn test_the_phy_commands_and_the_event_mask_bit()
     same_octets(hci_commands.build_le_set_default_phy(0, 0), [0x03, 0x00, 0x00])
     same_octets(hci_commands.build_le_set_phy(0x0040, 0x02, 0x02, 0), [0x40, 0x00, 0x00, 0x02, 0x02, 0x00, 0x00])
     same_octets(hci_commands.build_le_set_phy(0x0041, 0x00, 0x01, 0x0002), [0x41, 0x00, 0x01, 0x00, 0x01, 0x02, 0x00])
+    same_octets(hci_commands.build_le_set_phy(0x0042, 0x02, 0x00, 0), [0x42, 0x00, 0x02, 0x02, 0x00, 0x00, 0x00])
     test.assert_eq(hci_commands.PHY_MASK_1M | hci_commands.PHY_MASK_2M | hci_commands.PHY_MASK_CODED, 0x07)
     // Subevent 0x0C is bit 11 of the mask, and no bit the other masks of the package set.
     test.assert_eq(hci_commands.LE_EVENT_MASK_PHY_UPDATE_COMPLETE, 1 << 11)
