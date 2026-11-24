@@ -396,6 +396,29 @@ fn opcode_le_read_default_data_length() -> Int
     // OGF=0x08, OCF=0x0023 → 0x2023.
     (0x08 << 10) | 0x023
 
+// The opcode of the LE Write Suggested Default Data Length command, 0x2024 ([Vol 4] Part E, Section 7.8.35).
+pub @tier(embedded)
+@no_alloc
+fn opcode_le_write_default_data_length() -> Int
+    // OGF=0x08, OCF=0x0024 → 0x2024.
+    (0x08 << 10) | 0x024
+
+// The 4 parameter octets of the LE Write Suggested Default Data Length command: SuggestedMaxTxOctets (27 to 251) and SuggestedMaxTxTime
+// (328 to 17040 microseconds), each in two octets.  The time that carries `octets` of payload at LE 1M is `(octets + 14) * 8`, which the
+// builder writes (2,120 for 251, 328 for 27).  The Controller applies the pair to the connections that start after it, and
+// starts the Data Length Update procedure on such a connection when the pair is longer than 27 octets.
+pub @tier(embedded)
+fn build_le_write_default_data_length(octets: Int) -> [u8]
+    var out = hci_buf.buf(4)
+    var n = octets
+    if n < 27
+        n = 27
+    if n > 251
+        n = 251
+    hci_buf.put16(var out, n)
+    hci_buf.put16(var out, (n + 14) * 8)
+    out
+
 // The opcode of the LE Read Resolving List Size command, 0x202A ([Vol 4] Part E, Section 7.8.41).
 pub @tier(embedded)
 @no_alloc
