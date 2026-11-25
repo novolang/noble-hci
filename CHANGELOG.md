@@ -4,7 +4,7 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
-## Unreleased
+## 0.1.3 — 2026-11-25
 
 2026-11-23: `opcode_le_write_default_data_length()` (0x2024) and `build_le_write_default_data_length(octets)`, the LE Write Suggested Default Data Length command with the octets (27 to 251) and the time that carries them at LE 1M, `(octets + 14) * 8`.
 
